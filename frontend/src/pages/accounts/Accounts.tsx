@@ -487,11 +487,9 @@ export function Accounts() {
   const handleToggleAI = async (account: AccountWithKeywordCount) => {
     const newEnabled = !account.aiEnabled
     try {
-      // 先获取当前设置，避免覆盖其他字段（如custom_prompts）
-      const currentSettings = await getAIReplySettings(account.id)
+      // 只更新 ai_enabled 字段
       await updateAIReplySettings(account.id, {
-        ...currentSettings,
-        enabled: newEnabled,
+        ai_enabled: newEnabled,
       })
       setAccounts(prev => prev.map(a =>
         a.id === account.id ? { ...a, aiEnabled: newEnabled } : a,

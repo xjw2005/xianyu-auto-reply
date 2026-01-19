@@ -4616,9 +4616,15 @@ def update_ai_reply_settings(cookie_id: str, settings: AIReplySettings, current_
         if cookie_manager.manager is None:
             raise HTTPException(status_code=500, detail='CookieManager 未就绪')
 
-        # 保存设置
+        # 先获取现有设置，然后合并新设置
+        current_settings = db_manager.get_ai_reply_settings(cookie_id)
         settings_dict = settings.dict()
-        success = db_manager.save_ai_reply_settings(cookie_id, settings_dict)
+        
+        # 合并设置：用新值覆盖旧值
+        merged_settings = {**current_settings, **settings_dict}
+        
+        # 保存合并后的设置
+        success = db_manager.save_ai_reply_settings(cookie_id, merged_settings)
 
         if success:
 
