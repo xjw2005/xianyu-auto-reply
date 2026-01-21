@@ -31,6 +31,7 @@ export function Accounts() {
   const [defaultReplyAccount, setDefaultReplyAccount] = useState<AccountWithKeywordCount | null>(null)
   const [defaultReplyContent, setDefaultReplyContent] = useState('')
   const [defaultReplyImageUrl, setDefaultReplyImageUrl] = useState('')
+  const [defaultReplyOnce, setDefaultReplyOnce] = useState(false)
   const [defaultReplySaving, setDefaultReplySaving] = useState(false)
   const [uploadingDefaultReplyImage, setUploadingDefaultReplyImage] = useState(false)
 
@@ -423,6 +424,7 @@ export function Accounts() {
     setDefaultReplyAccount(account)
     setDefaultReplyContent('')
     setDefaultReplyImageUrl('')
+    setDefaultReplyOnce(false)
     setActiveModal('default-reply')
     
     // 加载当前默认回复
@@ -430,6 +432,7 @@ export function Accounts() {
       const result = await getDefaultReply(account.id)
       setDefaultReplyContent(result.reply_content || '')
       setDefaultReplyImageUrl(result.reply_image_url || '')
+      setDefaultReplyOnce(result.reply_once || false)
     } catch {
       // ignore
     }
@@ -440,7 +443,7 @@ export function Accounts() {
     
     try {
       setDefaultReplySaving(true)
-      await updateDefaultReply(defaultReplyAccount.id, defaultReplyContent, true, false, defaultReplyImageUrl)
+      await updateDefaultReply(defaultReplyAccount.id, defaultReplyContent, true, defaultReplyOnce, defaultReplyImageUrl)
       addToast({ type: 'success', message: '默认回复已保存' })
       closeModal()
     } catch {
@@ -1179,6 +1182,20 @@ export function Accounts() {
                     </button>
                   </div>
                 )}
+              </div>
+              <div className="input-group">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={defaultReplyOnce}
+                    onChange={(e) => setDefaultReplyOnce(e.target.checked)}
+                    className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="text-sm text-slate-700 dark:text-slate-300">只能回复一次</span>
+                </label>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                  开启后，每个对话只会使用默认回复一次，避免重复回复同一用户
+                </p>
               </div>
               <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
                 <p className="text-xs text-blue-600 dark:text-blue-400">
