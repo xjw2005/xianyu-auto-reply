@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, Form, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -74,6 +74,170 @@ def cleanup_qr_check_records():
             del qr_check_processed[session_id]
         if session_id in qr_check_locks:
             del qr_check_locks[session_id]
+
+
+async def _send_notifications_directly(message: str, attachment_path: str, account_id: str, user_id: int):
+    """直接发送通知（不依赖 XianyuLive 实例）
+
+    Args:
+        notifications: 通知配置列表
+        message: 通知消息
+        attachment_path: 附件路径（可选）
+        account_id: 账号ID
+        user_id: 用户ID（用于获取收件邮箱）
+    """
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.image import MIMEImage
+    import os
+
+    logger.info(f"开始直接发送通知给账号 {account_id}")
+    # 从系统设置获取通知收件邮箱
+    from db_manager import db_manager
+
+    # 获取当前用户的通知接收人邮箱
+    recipients = db_manager.get_notification_recipients(user_id=str(user_id))
+    if not recipients:
+        logger.warning("未设置通知收件邮箱，请在系统设置中配置")
+        return
+
+    # 获取第一个启用的邮箱
+    recipient = next((r for r in recipients if r.get('enabled', True)), None)
+    if not recipient:
+        logger.warning("没有启用的通知收件邮箱")
+        return
+
+    recipient_email = recipient['email']
+    logger.info(f"📧 收件邮箱: {recipient_email}")
+
+    try:
+        #无论如何都要发送。
+        # if not notification.get('enabled', True):
+        #     continue
+
+        channel_type = "email"
+        smtp_server = db_manager.get_system_setting('smtp_server')
+        smtp_port = db_manager.get_system_setting('smtp_port')
+        smtp_password = db_manager.get_system_setting('smtp_password')
+        smtp_user = db_manager.get_system_setting('smtp_user')
+        smtp_config = {
+            "smtp_server": smtp_server, "smtp_port": smtp_port, "email_user": smtp_user, "email_password": smtp_password, "recipient_email": recipient_email, "smtp_use_tls": smtp_port}
+
+        logger.info(f"📧 处理通知渠道: 类型={channel_type}")
+
+        # 解析配置数据（JSON字符串转字典）
+
+        logger.info(f"📧 解析后配置: {smtp_config}")
+
+        if channel_type == 'email':
+            # 使用系统设置中的收件邮箱
+            logger.info(f"📧 准备发送邮件，收件人: {recipient}")
+            # 发送邮件通知
+            await _send_email_direct(smtp_config, message, attachment_path)
+            logger.info(f"✅ 邮件发送完成")
+        else:
+            logger.warning(f"暂不支持的通知类型: {channel_type}")
+
+    except Exception as e:
+        logger.error(f"发送通知失败 : {str(e)}")
+        import traceback
+        logger.error(f"详细错误: {traceback.format_exc()}")
+
+
+async def _send_email_direct(config_data: dict, message: str, attachment_path: str = None):
+    """直接发送邮件通知
+
+    Args:
+        config_data: 邮件配置
+        message: 邮件正文
+        attachment_path: 附件路径
+    """
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.image import MIMEImage
+    import os
+
+    logger.info(f"📬 进入邮件发送函数，配置: {config_data.get('smtp_server', 'N/A')}")
+
+    try:
+        # 解析配置
+        smtp_server = config_data.get('smtp_server', '')
+        smtp_port = int(config_data.get('smtp_port', 587))
+        email_user = config_data.get('email_user', '')
+        email_password = config_data.get('email_password', '')
+        recipient_email = config_data.get('recipient_email', '')
+        smtp_use_tls = config_data.get('smtp_use_tls', smtp_port == 587)
+
+        logger.info(f"📬 邮件配置解析完成: 服务器={smtp_server}, 端口={smtp_port}, 发件人={email_user}, 收件人={recipient_email}")
+
+        if not all([smtp_server, email_user, email_password, recipient_email]):
+            logger.warning("邮件通知配置不完整")
+            return
+
+        # 创建邮件
+        msg = MIMEMultipart()
+        msg['From'] = email_user
+        msg['To'] = recipient_email
+        msg['Subject'] = "闲鱼登录验证通知"
+
+        # 添加邮件正文
+        msg.attach(MIMEText(message, 'plain', 'utf-8'))
+
+        # 添加附件（如果有）
+        if attachment_path and os.path.exists(attachment_path):
+            try:
+                with open(attachment_path, 'rb') as f:
+                    img_data = f.read()
+
+                # 根据文件扩展名判断MIME类型
+                filename = os.path.basename(attachment_path)
+                if attachment_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                    img = MIMEImage(img_data)
+                    img.add_header('Content-Disposition', 'attachment', filename=filename)
+                    msg.attach(img)
+                    logger.info(f"已添加图片附件: {filename}")
+                else:
+                    from email.mime.application import MIMEApplication
+                    attach = MIMEApplication(img_data)
+                    attach.add_header('Content-Disposition', 'attachment', filename=filename)
+                    msg.attach(attach)
+                    logger.info(f"已添加附件: {filename}")
+            except Exception as attach_error:
+                logger.error(f"添加邮件附件失败: {str(attach_error)}")
+
+        # 发送邮件
+        server = None
+        try:
+            if smtp_port == 465:
+                server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=30)
+            else:
+                server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)
+                if smtp_use_tls:
+                    server.starttls()
+
+            server.login(email_user, email_password)
+            server.send_message(msg)
+            logger.info(f"✅ 邮件发送成功: {recipient_email}")
+
+        except smtplib.SMTPAuthenticationError as auth_error:
+            logger.error(f"邮件SMTP认证失败: {str(auth_error)}")
+            logger.error(f"邮箱地址: {email_user}")
+            logger.error(f"SMTP服务器: {smtp_server}:{smtp_port}")
+        except Exception as e:
+            logger.error(f"发送邮件失败: {str(e)}")
+        finally:
+            if server:
+                try:
+                    server.quit()
+                except:
+                    pass
+
+    except Exception as e:
+        logger.error(f"发送邮件通知异常: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 def load_keywords() -> List[Tuple[str, str]]:
@@ -1333,6 +1497,16 @@ class MessageNotificationIn(BaseModel):
     enabled: bool = True
 
 
+class NotificationRecipientIn(BaseModel):
+    email: str
+    name: Optional[str] = ""
+
+
+class NotificationRecipientUpdate(BaseModel):
+    email: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
 class SystemSettingIn(BaseModel):
     value: str
     description: Optional[str] = None
@@ -1604,7 +1778,7 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
         # 定义通知回调函数，用于检测到人脸认证时返回验证链接或截图（同步函数）
         def notification_callback(message: str, screenshot_path: str = None, verification_url: str = None, screenshot_path_new: str = None):
             """人脸认证通知回调（同步）
-            
+
             Args:
                 message: 通知消息
                 screenshot_path: 旧版截图路径（兼容参数）
@@ -1614,133 +1788,86 @@ async def _execute_password_login(session_id: str, account_id: str, account: str
             try:
                 # 优先使用新的截图路径参数
                 actual_screenshot_path = screenshot_path_new if screenshot_path_new else screenshot_path
-                
-                # 优先使用截图路径，如果没有截图则使用验证链接
-                if actual_screenshot_path and os.path.exists(actual_screenshot_path):
-                    # 更新会话状态，保存截图路径
-                    password_login_sessions[session_id]['status'] = 'verification_required'
-                    password_login_sessions[session_id]['screenshot_path'] = actual_screenshot_path
-                    password_login_sessions[session_id]['verification_url'] = None
-                    password_login_sessions[session_id]['qr_code_url'] = None
+
+                # 更新会话状态
+                password_login_sessions[session_id]['status'] = 'verification_required'
+                password_login_sessions[session_id]['screenshot_path'] = actual_screenshot_path
+                password_login_sessions[session_id]['verification_url'] = verification_url
+                password_login_sessions[session_id]['qr_code_url'] = None
+
+                if actual_screenshot_path:
                     log_with_user('info', f"人脸认证截图已保存: {session_id}, 路径: {actual_screenshot_path}", current_user)
-                    
-                    # 发送通知到用户配置的渠道
-                    def send_face_verification_notification():
-                        """在后台线程中发送人脸验证通知"""
-                        try:
-                            from XianyuAutoAsync import XianyuLive
-                            log_with_user('info', f"开始尝试发送人脸验证通知: {account_id}", current_user)
-                            
-                            # 尝试获取XianyuLive实例（如果账号已经存在）
-                            live_instance = XianyuLive.get_instance(account_id)
-                            
-                            if live_instance:
-                                log_with_user('info', f"找到账号实例，准备发送通知: {account_id}", current_user)
-                                # 创建新的事件循环来运行异步通知
-                                new_loop = asyncio.new_event_loop()
-                                asyncio.set_event_loop(new_loop)
-                                try:
-                                    new_loop.run_until_complete(
-                                        live_instance.send_token_refresh_notification(
-                                            error_message=message,
-                                            notification_type="face_verification",
-                                            verification_url=None,
-                                            attachment_path=actual_screenshot_path
-                                        )
-                                    )
-                                    log_with_user('info', f"✅ 已发送人脸验证通知: {account_id}", current_user)
-                                except Exception as notify_err:
-                                    log_with_user('error', f"发送人脸验证通知失败: {str(notify_err)}", current_user)
-                                    import traceback
-                                    log_with_user('error', f"通知错误详情: {traceback.format_exc()}", current_user)
-                                finally:
-                                    new_loop.close()
-                            else:
-                                # 如果账号实例不存在，记录警告并尝试从数据库获取通知配置
-                                log_with_user('warning', f"账号实例不存在: {account_id}，尝试从数据库获取通知配置", current_user)
-                                try:
-                                    # 尝试从数据库获取通知配置
-                                    notifications = db_manager.get_account_notifications(account_id)
-                                    if notifications:
-                                        log_with_user('info', f"找到 {len(notifications)} 个通知配置，但需要账号实例才能发送", current_user)
-                                        log_with_user('warning', f"账号实例不存在，无法发送通知: {account_id}。请确保账号已登录并运行中。", current_user)
-                                    else:
-                                        log_with_user('warning', f"账号 {account_id} 未配置通知渠道", current_user)
-                                except Exception as db_err:
-                                    log_with_user('error', f"获取通知配置失败: {str(db_err)}", current_user)
-                        except Exception as notify_err:
-                            log_with_user('error', f"发送人脸验证通知时出错: {str(notify_err)}", current_user)
-                            import traceback
-                            log_with_user('error', f"通知错误详情: {traceback.format_exc()}", current_user)
-                    
-                    # 在后台线程中发送通知，避免阻塞登录流程
-                    import threading
-                    notification_thread = threading.Thread(target=send_face_verification_notification)
-                    notification_thread.daemon = True
-                    notification_thread.start()
-                    log_with_user('info', f"已启动人脸验证通知发送线程: {account_id}", current_user)
                 elif verification_url:
-                    # 如果没有截图，使用验证链接（兼容旧版本）
-                    password_login_sessions[session_id]['status'] = 'verification_required'
-                    password_login_sessions[session_id]['verification_url'] = verification_url
-                    password_login_sessions[session_id]['screenshot_path'] = None
-                    password_login_sessions[session_id]['qr_code_url'] = None
                     log_with_user('info', f"人脸认证验证链接已保存: {session_id}, URL: {verification_url}", current_user)
-                    
-                    # 发送通知到用户配置的渠道
-                    def send_face_verification_notification():
-                        """在后台线程中发送人脸验证通知"""
-                        try:
-                            from XianyuAutoAsync import XianyuLive
-                            log_with_user('info', f"开始尝试发送人脸验证通知: {account_id}", current_user)
-                            
-                            # 尝试获取XianyuLive实例（如果账号已经存在）
-                            live_instance = XianyuLive.get_instance(account_id)
-                            
-                            if live_instance:
-                                log_with_user('info', f"找到账号实例，准备发送通知: {account_id}", current_user)
+
+                # 统一的人脸验证通知发送函数
+                def send_face_verification_notification():
+                    """在后台线程中发送人脸验证通知"""
+                    try:
+                        from XianyuAutoAsync import XianyuLive
+                        log_with_user('info', f"开始尝试发送人脸验证通知: {account_id}", current_user)
+
+                        # 尝试获取XianyuLive实例（如果账号已经存在）
+                        live_instance = XianyuLive.get_instance(account_id)
+
+                        if live_instance:
+                            log_with_user('info', f"找到账号实例，准备发送通知: {account_id}", current_user)
+                            # 创建新的事件循环来运行异步通知
+                            new_loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(new_loop)
+                            try:
+                                new_loop.run_until_complete(
+                                    live_instance.send_token_refresh_notification(
+                                        error_message=message,
+                                        notification_type="face_verification",
+                                        verification_url=verification_url,
+                                        attachment_path=actual_screenshot_path
+                                    )
+                                )
+                                log_with_user('info', f"✅ 已发送人脸验证通知: {account_id}", current_user)
+                            except Exception as notify_err:
+                                log_with_user('error', f"发送人脸验证通知失败: {str(notify_err)}", current_user)
+                                import traceback
+                                log_with_user('error', f"通知错误详情: {traceback.format_exc()}", current_user)
+                            finally:
+                                new_loop.close()
+                        else:
+                            # 如果账号实例不存在，直接使用全局通知渠道发送通知
+                            log_with_user('info', f"账号实例不存在，使用全局通知渠道发送人脸验证通知: {account_id}", current_user)
+                            try:
                                 # 创建新的事件循环来运行异步通知
                                 new_loop = asyncio.new_event_loop()
                                 asyncio.set_event_loop(new_loop)
                                 try:
+                                    # 直接发送通知（不依赖 XianyuLive 实例）
                                     new_loop.run_until_complete(
-                                        live_instance.send_token_refresh_notification(
-                                            error_message=message,
-                                            notification_type="face_verification",
-                                            verification_url=verification_url
+                                        _send_notifications_directly(
+                                            message,
+                                            actual_screenshot_path,
+                                            account_id,
+                                            user_id
                                         )
                                     )
                                     log_with_user('info', f"✅ 已发送人脸验证通知: {account_id}", current_user)
-                                except Exception as notify_err:
-                                    log_with_user('error', f"发送人脸验证通知失败: {str(notify_err)}", current_user)
+                                except Exception as direct_err:
+                                    log_with_user('error', f"直接发送通知失败: {str(direct_err)}", current_user)
                                     import traceback
                                     log_with_user('error', f"通知错误详情: {traceback.format_exc()}", current_user)
                                 finally:
                                     new_loop.close()
-                            else:
-                                # 如果账号实例不存在，记录警告并尝试从数据库获取通知配置
-                                log_with_user('warning', f"账号实例不存在: {account_id}，尝试从数据库获取通知配置", current_user)
-                                try:
-                                    # 尝试从数据库获取通知配置
-                                    notifications = db_manager.get_account_notifications(account_id)
-                                    if notifications:
-                                        log_with_user('info', f"找到 {len(notifications)} 个通知配置，但需要账号实例才能发送", current_user)
-                                        log_with_user('warning', f"账号实例不存在，无法发送通知: {account_id}。请确保账号已登录并运行中。", current_user)
-                                    else:
-                                        log_with_user('warning', f"账号 {account_id} 未配置通知渠道", current_user)
-                                except Exception as db_err:
-                                    log_with_user('error', f"获取通知配置失败: {str(db_err)}", current_user)
-                        except Exception as notify_err:
-                            log_with_user('error', f"发送人脸验证通知时出错: {str(notify_err)}", current_user)
-                            import traceback
-                            log_with_user('error', f"通知错误详情: {traceback.format_exc()}", current_user)
-                    
-                    # 在后台线程中发送通知，避免阻塞登录流程
-                    import threading
-                    notification_thread = threading.Thread(target=send_face_verification_notification)
-                    notification_thread.daemon = True
-                    notification_thread.start()
-                    log_with_user('info', f"已启动人脸验证通知发送线程: {account_id}", current_user)
+                            except Exception as db_err:
+                                log_with_user('error', f"获取全局通知配置失败: {str(db_err)}", current_user)
+                    except Exception as notify_err:
+                        log_with_user('error', f"发送人脸验证通知时出错: {str(notify_err)}", current_user)
+                        import traceback
+                        log_with_user('error', f"通知错误详情: {traceback.format_exc()}", current_user)
+
+                # 在后台线程中发送通知，避免阻塞登录流程
+                import threading
+                notification_thread = threading.Thread(target=send_face_verification_notification)
+                notification_thread.daemon = True
+                notification_thread.start()
+                log_with_user('info', f"已启动人脸验证通知发送线程: {account_id}", current_user)
             except Exception as e:
                 log_with_user('error', f"处理人脸认证通知失败: {str(e)}", current_user)
         
@@ -2737,230 +2864,6 @@ def clear_default_reply_records_compat(cid: str, current_user: Dict[str, Any] = 
     return clear_default_reply_records(cid, current_user)
 
 
-# ------------------------- 商品默认回复管理接口 -------------------------
-
-class ItemDefaultReplyIn(BaseModel):
-    """商品默认回复输入模型"""
-    reply_content: str = ''
-    reply_image_url: str = ''
-    enabled: bool = True
-    reply_once: bool = False
-
-
-class BatchItemDefaultReplyIn(BaseModel):
-    """批量商品默认回复输入模型"""
-    item_ids: List[str]
-    reply_content: str = ''
-    reply_image_url: str = ''
-    enabled: bool = True
-    reply_once: bool = False
-
-
-class BatchDeleteItemDefaultReplyIn(BaseModel):
-    """批量删除商品默认回复输入模型"""
-    item_ids: List[str]
-
-
-@app.get('/items/{cid}/{item_id}/default-reply')
-def get_item_default_reply(cid: str, item_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """获取商品默认回复设置"""
-    from db_manager import db_manager
-    try:
-        user_id = current_user['user_id']
-        user_cookies = db_manager.get_all_cookies(user_id)
-        
-        if cid not in user_cookies:
-            raise HTTPException(status_code=403, detail="无权限访问该Cookie")
-        
-        result = db_manager.get_item_default_reply(cid, item_id)
-        if result is None:
-            return {'success': True, 'data': None}
-        return {
-            'success': True,
-            'data': {
-                'item_id': item_id,
-                'reply_content': result.get('reply_content', ''),
-                'reply_image': result.get('reply_image_url', ''),
-                'enabled': result.get('enabled', False),
-                'reply_once': result.get('reply_once', False)
-            }
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.put('/items/{cid}/{item_id}/default-reply')
-def save_item_default_reply(cid: str, item_id: str, reply_data: ItemDefaultReplyIn, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """保存商品默认回复设置"""
-    from db_manager import db_manager
-    try:
-        user_id = current_user['user_id']
-        user_cookies = db_manager.get_all_cookies(user_id)
-        
-        if cid not in user_cookies:
-            raise HTTPException(status_code=403, detail="无权限操作该Cookie")
-        
-        success = db_manager.save_item_default_reply(
-            cookie_id=cid,
-            item_id=item_id,
-            reply_content=reply_data.reply_content,
-            enabled=reply_data.enabled,
-            reply_once=reply_data.reply_once,
-            reply_image_url=reply_data.reply_image_url
-        )
-        
-        if success:
-            return {'success': True, 'message': '商品默认回复保存成功'}
-        else:
-            raise HTTPException(status_code=400, detail='保存失败')
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete('/items/{cid}/{item_id}/default-reply')
-def delete_item_default_reply(cid: str, item_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """删除商品默认回复设置"""
-    from db_manager import db_manager
-    try:
-        user_id = current_user['user_id']
-        user_cookies = db_manager.get_all_cookies(user_id)
-        
-        if cid not in user_cookies:
-            raise HTTPException(status_code=403, detail="无权限操作该Cookie")
-        
-        success = db_manager.delete_item_default_reply(cid, item_id)
-        if success:
-            return {'success': True, 'message': '商品默认回复删除成功'}
-        else:
-            return {'success': False, 'message': '未找到该商品的默认回复设置'}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post('/items/{cid}/batch-default-reply')
-def batch_save_item_default_reply(cid: str, reply_data: BatchItemDefaultReplyIn, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """批量保存商品默认回复设置"""
-    from db_manager import db_manager
-    try:
-        user_id = current_user['user_id']
-        user_cookies = db_manager.get_all_cookies(user_id)
-        
-        if cid not in user_cookies:
-            raise HTTPException(status_code=403, detail="无权限操作该Cookie")
-        
-        success_count = 0
-        fail_count = 0
-        
-        for item_id in reply_data.item_ids:
-            try:
-                success = db_manager.save_item_default_reply(
-                    cookie_id=cid,
-                    item_id=item_id,
-                    reply_content=reply_data.reply_content,
-                    enabled=reply_data.enabled,
-                    reply_once=reply_data.reply_once,
-                    reply_image_url=reply_data.reply_image_url
-                )
-                if success:
-                    success_count += 1
-                else:
-                    fail_count += 1
-            except Exception:
-                fail_count += 1
-        
-        return {
-            'success': True,
-            'message': f'批量保存完成，成功 {success_count} 个，失败 {fail_count} 个',
-            'success_count': success_count,
-            'fail_count': fail_count
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post('/items/{cid}/batch-delete-default-reply')
-def batch_delete_item_default_reply(cid: str, delete_data: BatchDeleteItemDefaultReplyIn, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """批量删除商品默认回复设置"""
-    from db_manager import db_manager
-    try:
-        user_id = current_user['user_id']
-        user_cookies = db_manager.get_all_cookies(user_id)
-        
-        if cid not in user_cookies:
-            raise HTTPException(status_code=403, detail="无权限操作该Cookie")
-        
-        success_count = 0
-        fail_count = 0
-        
-        for item_id in delete_data.item_ids:
-            try:
-                success = db_manager.delete_item_default_reply(cid, item_id)
-                if success:
-                    success_count += 1
-                else:
-                    fail_count += 1
-            except Exception:
-                fail_count += 1
-        
-        return {
-            'success': True,
-            'message': f'批量删除完成，成功 {success_count} 个，失败 {fail_count} 个',
-            'success_count': success_count,
-            'fail_count': fail_count
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post('/items/{cid}/{item_id}/default-reply/upload-image')
-async def upload_item_default_reply_image(cid: str, item_id: str, image: UploadFile = File(...), current_user: Dict[str, Any] = Depends(get_current_user)):
-    """上传商品默认回复图片"""
-    from db_manager import db_manager
-    try:
-        user_id = current_user['user_id']
-        user_cookies = db_manager.get_all_cookies(user_id)
-        
-        if cid not in user_cookies:
-            raise HTTPException(status_code=403, detail="无权限操作该Cookie")
-        
-        # 检查文件类型
-        if not image.content_type or not image.content_type.startswith('image/'):
-            raise HTTPException(status_code=400, detail="只能上传图片文件")
-        
-        # 生成文件名
-        import uuid
-        ext = image.filename.split('.')[-1] if '.' in image.filename else 'png'
-        filename = f"{uuid.uuid4().hex}.{ext}"
-        
-        # 保存到 static/uploads/default_reply 目录
-        upload_dir = os.path.join('static', 'uploads', 'default_reply')
-        os.makedirs(upload_dir, exist_ok=True)
-        
-        file_path = os.path.join(upload_dir, filename)
-        with open(file_path, 'wb') as f:
-            content = await image.read()
-            f.write(content)
-        
-        # 返回相对路径
-        image_url = f'/static/uploads/default_reply/{filename}'
-        
-        return {'success': True, 'image_url': image_url}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 # ------------------------- 通知渠道管理接口 -------------------------
 
 @app.get('/notification-channels')
@@ -3058,6 +2961,74 @@ def get_all_message_notifications(current_user: Dict[str, Any] = Depends(get_cur
         # 过滤只属于当前用户的通知配置
         user_notifications = {cid: notifications for cid, notifications in all_notifications.items() if cid in user_cookies}
         return user_notifications
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== 通知接收人管理 ====================
+
+@app.get('/notification-recipients')
+def get_notification_recipients(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取当前用户的通知接收人列表"""
+    from db_manager import db_manager
+    try:
+        user_id = str(current_user['user_id'])
+        recipients = db_manager.get_notification_recipients(user_id)
+        return recipients
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post('/notification-recipients')
+def add_notification_recipient(recipient_data: NotificationRecipientIn, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """添加通知接收人"""
+    from db_manager import db_manager
+    try:
+        user_id = str(current_user['user_id'])
+        recipient_id = db_manager.add_notification_recipient(
+            recipient_data.email,
+            user_id
+        )
+        return {'success': True, 'msg': 'notification recipient added', 'id': recipient_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put('/notification-recipients/{recipient_id}')
+def update_notification_recipient(recipient_id: int, recipient_data: NotificationRecipientUpdate, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """更新通知接收人"""
+    from db_manager import db_manager
+    try:
+        user_id = str(current_user['user_id'])
+        success = db_manager.update_notification_recipient(
+            recipient_id,
+            user_id,
+            email=recipient_data.email,
+            enabled=recipient_data.enabled
+        )
+        if success:
+            return {'success': True, 'msg': 'notification recipient updated'}
+        else:
+            raise HTTPException(status_code=404, detail='接收人不存在')
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete('/notification-recipients/{recipient_id}')
+def delete_notification_recipient(recipient_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """删除通知接收人"""
+    from db_manager import db_manager
+    try:
+        user_id = str(current_user['user_id'])
+        success = db_manager.delete_notification_recipient(recipient_id, user_id)
+        if success:
+            return {'success': True, 'msg': 'notification recipient deleted'}
+        else:
+            raise HTTPException(status_code=404, detail='接收人不存在')
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -3878,7 +3849,7 @@ async def import_keywords(cid: str, file: UploadFile = File(...), current_user: 
                 return str(int(value)).strip()
             return str(value).strip()
 
-        for index, row in df.iterrows():
+        for _, row in df.iterrows():
             keyword = clean_cell_value(row['关键词'])
             item_id = clean_cell_value(row['商品ID']) or None
             reply = clean_cell_value(row['关键词内容'])
@@ -4400,41 +4371,9 @@ def delete_delivery_rule(rule_id: int, current_user: Dict[str, Any] = Depends(ge
 # ==================== 备份和恢复 API ====================
 
 @app.get("/backup/export")
-def export_backup(
-    token: str = None,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
-):
-    """导出用户备份
-    
-    支持两种认证方式：
-    1. Authorization Header (Bearer token)
-    2. URL 参数 (?token=xxx)
-    """
+def export_backup(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """导出用户备份"""
     try:
-        # 验证用户权限（支持 URL 参数和 Header 两种方式）
-        current_user = None
-        
-        # 优先使用 Header 中的 token
-        if credentials and credentials.credentials:
-            token_to_verify = credentials.credentials
-        elif token:
-            token_to_verify = token
-        else:
-            raise HTTPException(status_code=401, detail="未授权访问")
-        
-        # 验证 token
-        if token_to_verify not in SESSION_TOKENS:
-            raise HTTPException(status_code=401, detail="无效的token")
-        
-        token_data = SESSION_TOKENS[token_to_verify]
-        
-        # 检查 token 是否过期
-        if time.time() - token_data['timestamp'] > TOKEN_EXPIRE_TIME:
-            del SESSION_TOKENS[token_to_verify]
-            raise HTTPException(status_code=401, detail="token已过期")
-        
-        current_user = token_data
-        
         from db_manager import db_manager
         user_id = current_user['user_id']
         username = current_user['username']
@@ -4453,8 +4392,6 @@ def export_backup(
         response.headers["Content-Type"] = "application/json"
 
         return response
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"导出备份失败: {str(e)}")
 
@@ -4874,15 +4811,9 @@ def update_ai_reply_settings(cookie_id: str, settings: AIReplySettings, current_
         if cookie_manager.manager is None:
             raise HTTPException(status_code=500, detail='CookieManager 未就绪')
 
-        # 先获取现有设置，然后合并新设置
-        current_settings = db_manager.get_ai_reply_settings(cookie_id)
+        # 保存设置
         settings_dict = settings.dict()
-        
-        # 合并设置：用新值覆盖旧值
-        merged_settings = {**current_settings, **settings_dict}
-        
-        # 保存合并后的设置
-        success = db_manager.save_ai_reply_settings(cookie_id, merged_settings)
+        success = db_manager.save_ai_reply_settings(cookie_id, settings_dict)
 
         if success:
 
@@ -5049,36 +4980,6 @@ async def delete_risk_control_log(
     except Exception as e:
         log_with_user('error', f"删除风控日志失败: {log_id} - {str(e)}", admin_user)
         return {"success": False, "message": f"删除失败: {str(e)}"}
-
-
-@app.delete("/admin/risk-control-logs")
-async def clear_risk_control_logs(
-    cookie_id: str = None,
-    admin_user: Dict[str, Any] = Depends(require_admin)
-):
-    """清空风控日志（管理员专用）"""
-    try:
-        if cookie_id:
-            log_with_user('info', f"清空指定账号的风控日志: {cookie_id}", admin_user)
-        else:
-            log_with_user('info', "清空所有风控日志", admin_user)
-
-        # 清空风控日志
-        with db_manager.lock:
-            cursor = db_manager.conn.cursor()
-            if cookie_id:
-                cursor.execute('DELETE FROM risk_control_logs WHERE cookie_id = ?', (cookie_id,))
-            else:
-                cursor.execute('DELETE FROM risk_control_logs')
-            db_manager.conn.commit()
-            deleted_count = cursor.rowcount
-
-        log_with_user('info', f"风控日志清空成功，共删除 {deleted_count} 条记录", admin_user)
-        return {"success": True, "message": f"已清空 {deleted_count} 条日志"}
-
-    except Exception as e:
-        log_with_user('error', f"清空风控日志失败: {str(e)}", admin_user)
-        return {"success": False, "message": f"清空失败: {str(e)}"}
 
 
 @app.get("/logs/stats")
@@ -5779,49 +5680,13 @@ def get_item_reply(cookie_id: str, item_id: str, current_user: Dict[str, Any] = 
 # ------------------------- 数据库备份和恢复接口 -------------------------
 
 @app.get('/admin/backup/download')
-def download_database_backup(
-    token: str = None,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
-):
-    """下载数据库备份文件（管理员专用）
-    
-    支持两种认证方式：
-    1. Authorization Header (Bearer token)
-    2. URL 参数 (?token=xxx)
-    """
+def download_database_backup(admin_user: Dict[str, Any] = Depends(require_admin)):
+    """下载数据库备份文件（管理员专用）"""
     import os
     from fastapi.responses import FileResponse
     from datetime import datetime
 
     try:
-        # 验证管理员权限（支持 URL 参数和 Header 两种方式）
-        admin_user = None
-        
-        # 优先使用 Header 中的 token
-        if credentials and credentials.credentials:
-            token_to_verify = credentials.credentials
-        elif token:
-            token_to_verify = token
-        else:
-            raise HTTPException(status_code=401, detail="未授权访问")
-        
-        # 验证 token
-        if token_to_verify not in SESSION_TOKENS:
-            raise HTTPException(status_code=401, detail="无效的token")
-        
-        token_data = SESSION_TOKENS[token_to_verify]
-        
-        # 检查 token 是否过期
-        if time.time() - token_data['timestamp'] > TOKEN_EXPIRE_TIME:
-            del SESSION_TOKENS[token_to_verify]
-            raise HTTPException(status_code=401, detail="token已过期")
-        
-        # 检查是否是管理员
-        if token_data['username'] != ADMIN_USERNAME:
-            raise HTTPException(status_code=403, detail="需要管理员权限")
-        
-        admin_user = token_data
-
         log_with_user('info', "请求下载数据库备份", admin_user)
 
         # 使用db_manager的实际数据库路径

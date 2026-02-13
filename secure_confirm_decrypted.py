@@ -157,14 +157,21 @@ class SecureConfirm:
 
                 logger.info(f"【{self.cookie_id}】自动确认发货响应: {res_json}")
 
-                # 检查响应结果
-                if res_json.get('ret') and res_json['ret'][0] == 'SUCCESS::调用成功':
-                    logger.info(f"【{self.cookie_id}】✅ 自动确认发货成功，订单ID: {order_id}")
-                    return {"success": True, "order_id": order_id}
-                else:
-                    error_msg = res_json.get('ret', ['未知错误'])[0] if res_json.get('ret') else '未知错误'
-                    logger.warning(f"【{self.cookie_id}】❌ 自动确认发货失败: {error_msg}")
+                # 检查响应结果（统一归一化，避免编码/大小写/类型差异导致误判）
+                ret_list = res_json.get('ret', [])
+                ret_msg = ret_list[0] if ret_list else '未知错误'
+                ret_msg_str = self._safe_str(ret_msg)
+                ret_text = " | ".join(self._safe_str(v) for v in ret_list) if ret_list else ret_msg_str
+                ret_text_upper = ret_text.upper()
 
+                if any(marker in ret_text_upper for marker in ("SUCCESS::", "ORDER_ALREADY_DELIVERY")) or "已发货成功" in ret_text:
+                    logger.info(f"【{self.cookie_id}】✅ 自动确认发货成功(幂等成功也视为成功)，订单ID: {order_id}, ret: {ret_text}")
+                    return {"success": True, "order_id": order_id, "ret": ret_text}
+                elif "ORDER_STATUS_ERROR" in ret_text_upper:
+                    logger.warning(f"【{self.cookie_id}】⚠️ 订单状态不正确(可能已退款或关闭)，停止重试: {ret_text}")
+                    return {"success": False, "error": ret_msg_str, "order_id": order_id, "ret": ret_text}
+                else:
+                    logger.warning(f"【{self.cookie_id}】❌ 自动确认发货失败: {ret_text}")
                     return await self.auto_confirm(order_id, item_id, retry_count + 1)
 
 

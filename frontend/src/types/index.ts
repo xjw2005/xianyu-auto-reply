@@ -193,6 +193,8 @@ export interface SystemSettings {
   smtp_from?: string
   smtp_use_tls?: boolean
   smtp_use_ssl?: boolean
+  // 通知收件邮箱
+  notification_recipient_email?: string
   // API安全
   qq_reply_secret_key?: string
   [key: string]: unknown

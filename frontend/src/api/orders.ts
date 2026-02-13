@@ -1,4 +1,4 @@
-import { get, del } from '@/utils/request'
+import { get, del, post } from '@/utils/request'
 import type { Order, ApiResponse } from '@/types'
 
 // 订单详情类型
@@ -66,4 +66,18 @@ export const batchDeleteOrders = async (_ids: string[]): Promise<ApiResponse> =>
 // 更新订单状态
 export const updateOrderStatus = async (_id: string, _status: string): Promise<ApiResponse> => {
   return { success: false, message: '后端暂未实现订单状态更新接口' }
+}
+
+// 同步订单列表
+export const syncOrders = async (cookieId: string, maxOrders?: number): Promise<{ success: boolean; message: string; data?: any }> => {
+  try {
+    const body: any = { cookie_id: cookieId }
+    if (maxOrders !== undefined) {
+      body.max_orders = maxOrders
+    }
+    const result = await post<{ success: boolean; message: string; data?: any }>('/api/orders/sync', body)
+    return result
+  } catch {
+    return { success: false, message: '同步订单失败' }
+  }
 }

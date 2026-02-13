@@ -31,6 +31,7 @@ def generate_headers():
         'Sec-Fetch-Site': 'same-origin',
         'Referer': 'https://passport.goofish.com/',
         'Origin': 'https://passport.goofish.com',
+        'bx-v': '2.5.31',  # 添加浏览器版本标识（官方网页有这个字段）
     }
 
 
@@ -98,6 +99,57 @@ class QRLoginManager:
     def _cookie_marshal(self, cookies: dict) -> str:
         """将Cookie字典转换为字符串"""
         return "; ".join([f"{k}={v}" for k, v in cookies.items()])
+
+    async def _init_browser_env(self, session: QRLoginSession):
+        """
+        初始化浏览器环境，获取关键的Cookie
+        模拟真实浏览器访问闲鱼登录页前的行为，避免触发风控
+        """
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=self.timeout,
+            proxy=self.proxy
+        ) as client:
+            try:
+                # 1. 访问闲鱼首页，获取基础Cookie（cna, isg等）
+                logger.info(f"[{session.session_id}] 正在访问闲鱼首页获取基础Cookie...")
+                resp = await client.get(
+                    "https://www.goofish.com/",
+                    headers=self.headers
+                )
+
+                # 保存关键Cookie
+                key_cookies = ['cna', 'isg', 'isg2', 'cookie2']
+                for k, v in resp.cookies.items():
+                    if k in key_cookies:
+                        session.cookies[k] = v
+                        logger.info(f"[{session.session_id}] ✅ 获取Cookie: {k}={v[:20]}...")
+
+                # 2. 访问登录页首页，获取更多Cookie
+                logger.info(f"[{session.session_id}] 正在访问登录页获取更多Cookie...")
+                login_params = {
+                    "appName": "xianyu",
+                    "appEntrance": "web",
+                    "lang": "zh_cn"
+                }
+                resp = await client.get(
+                    self.api_mini_login,
+                    params=login_params,
+                    headers=self.headers,
+                    cookies=session.cookies
+                )
+
+                # 保存从登录页获取的所有Cookie
+                for k, v in resp.cookies.items():
+                    if k not in session.cookies:  # 避免覆盖已有Cookie
+                        session.cookies[k] = v
+                        logger.info(f"[{session.session_id}] ✅ 获取Cookie: {k}={v[:20]}...")
+
+                logger.info(f"[{session.session_id}] ✅ 初始化完成，共获取 {len(session.cookies)} 个Cookie")
+
+            except Exception as e:
+                logger.warning(f"[{session.session_id}] ⚠️ 初始化浏览器环境失败: {e}")
+                # 不抛出异常，继续执行后续流程
 
     async def _get_mh5tk(self, session: QRLoginSession) -> dict:
         """获取m_h5_tk和m_h5_tk_enc"""
@@ -181,7 +233,21 @@ class QRLoginManager:
                     view_data = json.loads(json_string)
                     data = view_data.get("loginFormData")
                     if data:
-                        data["umidTag"] = "SERVER"
+                        # 尝试从页面提取 _csrf_token
+                        csrf_pattern = r'_csrf["\']?\s*[:=]\s*["\']([^"\']+)["\']'
+                        csrf_match = re.search(csrf_pattern, resp.text)
+                        csrf_token = csrf_match.group(1) if csrf_match else ""
+
+                        # 保持SERVER模式（官方也是用的SERVER）
+                        # 添加缺失的关键参数
+                        if csrf_token:
+                            data["_csrf_token"] = csrf_token
+                        data["umidTag"] = "SERVER"  # 官方用的SERVER，不是CLIENT
+                        data["umidToken"] = "91dac7358139e74e0c08d2dfdeba316884dc7846"  # 新的Token
+                        data["hsiz"] = "2520d37e79ba44421d64eeebb5fd62e3"  # 添加hsiz参数
+                        data["bizParams"] = "taobaoBizLoginFrom=web&renderRefer=https://www.goofish.com/"  # 官方的bizParams
+                        data["mainPage"] = "false"  # 添加mainPage参数
+                        data["returnUrl"] = ""  # 添加returnUrl参数
                         session.params.update(data)
                         return data
                     else:
@@ -204,6 +270,9 @@ class QRLoginManager:
             # 创建新的会话
             session_id = str(uuid.uuid4())
             session = QRLoginSession(session_id)
+
+            # 0. 先初始化浏览器环境，获取关键Cookie（避免风控）
+            await self._init_browser_env(session)
 
             # 1. 获取m_h5_tk
             await self._get_mh5tk(session)

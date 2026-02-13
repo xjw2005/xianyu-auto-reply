@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
-import { ShoppingCart, RefreshCw, Search, Trash2, Eye, X, ChevronLeft, ChevronRight } from 'lucide-react'
-import { getOrders, deleteOrder, getOrderDetail, type OrderDetail } from '@/api/orders'
+import { ShoppingCart, RefreshCw, Search, Trash2, Eye, X, ChevronLeft, ChevronRight, Download } from 'lucide-react'
+import { getOrders, deleteOrder, getOrderDetail, syncOrders, type OrderDetail } from '@/api/orders'
 import { getAccounts } from '@/api/accounts'
 import { useUIStore } from '@/store/uiStore'
 import { useAuthStore } from '@/store/authStore'
@@ -33,6 +33,7 @@ export function Orders() {
   const [detailModalOpen, setDetailModalOpen] = useState(false)
   const [orderDetail, setOrderDetail] = useState<OrderDetail | null>(null)
   const [loadingDetail, setLoadingDetail] = useState(false)
+  const [syncing, setSyncing] = useState(false)
   // 分页状态
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize] = useState(20)
@@ -113,6 +114,30 @@ export function Orders() {
     }
   }
 
+  const handleSyncOrders = async () => {
+    if (!selectedAccount) {
+      addToast({ type: 'error', message: '请先选择要同步的账号' })
+      return
+    }
+
+    setSyncing(true)
+    try {
+      const result = await syncOrders(selectedAccount)
+
+      if (result.success) {
+        addToast({ type: 'success', message: result.message || '订单同步成功' })
+        // 刷新订单列表
+        await loadOrders(currentPage)
+      } else {
+        addToast({ type: 'error', message: result.message || '订单同步失败' })
+      }
+    } catch {
+      addToast({ type: 'error', message: '订单同步失败' })
+    } finally {
+      setSyncing(false)
+    }
+  }
+
   const filteredOrders = orders.filter((order) => {
     if (!searchKeyword) return true
     const keyword = searchKeyword.toLowerCase()
@@ -135,10 +160,20 @@ export function Orders() {
           <h1 className="page-title">订单管理</h1>
           <p className="page-description">查看和管理所有订单信息</p>
         </div>
-        <button onClick={() => loadOrders(currentPage)} className="btn-ios-secondary w-full sm:w-auto">
-          <RefreshCw className="w-4 h-4" />
-          刷新
-        </button>
+        <div className="flex gap-2 w-full sm:w-auto">
+          <button
+            onClick={handleSyncOrders}
+            disabled={syncing || !selectedAccount}
+            className="btn-ios-secondary w-full sm:w-auto"
+          >
+            <Download className="w-4 h-4" />
+            {syncing ? '同步中...' : '订单更新'}
+          </button>
+          <button onClick={() => loadOrders(currentPage)} className="btn-ios-secondary w-full sm:w-auto">
+            <RefreshCw className="w-4 h-4" />
+            刷新
+          </button>
+        </div>
       </div>
 
       {/* Filters */}

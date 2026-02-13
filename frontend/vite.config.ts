@@ -228,6 +228,11 @@ export default defineConfig(({ command }) => ({
           }
         },
       },
+      // 通知接收人
+      '/notification-recipients': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
       // 关键词 - 前端有 /keywords 路由
       '/keywords': {
         target: 'http://localhost:8080',

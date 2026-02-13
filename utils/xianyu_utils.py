@@ -107,11 +107,11 @@ def generate_device_id(user_id: str) -> str:
     return ''.join(result) + "-" + user_id
 
 
-def generate_sign(t: str, token: str, data: str) -> str:
+def generate_sign(t: str, token: str, data: str, app_key = None) -> str:
     """生成签名"""
-    app_key = "34839810"
+    app_key = app_key or "34839810"
     msg = f"{token}&{t}&{app_key}&{data}"
-    
+    logger.info(f"生成前面中：app_key:{app_key}")
     # 使用MD5生成签名
     md5_hash = hashlib.md5()
     md5_hash.update(msg.encode('utf-8'))
