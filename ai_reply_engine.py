@@ -38,25 +38,25 @@ class AIReplyEngine:
         """初始化默认提示词"""
         self.default_prompts = {
             'classify': '''你是一个意图分类专家...（此提示词已不再被 detect_intent 使用）''',
-            
+
             'price': '''你是一位经验丰富的销售专家，擅长议价。
-语言要求：简短直接，每句≤10字，总字数≤40字。
+语言要求：简短直接，每句≤15字，总字数≤30字。
 议价策略：
 1. 根据议价次数递减优惠：第1次小幅优惠，第2次中等优惠，第3次最大优惠
-2. 接近最大议价轮数时要坚持底线，强调商品价值
+2. 接近最大议价轮数时要坚持底线，强调商品价值  
 3. 优惠不能超过设定的最大百分比和金额
 4. 语气要友好但坚定，突出商品优势
-注意：结合商品信息、对话历史和议价设置，给出合适的回复。''',
-            
+注意：要有真人的感觉，结合商品信息、对话历史和议价设置，给出合适的回复，句意完整。''',
+
             'tech': '''你是一位技术专家，专业解答产品相关问题。
-语言要求：简短专业，每句≤10字，总字数≤40字。
+语言要求：简短专业，每句≤15字，总字数≤30字。
 回答重点：产品功能、使用方法、注意事项。
-注意：基于商品信息回答，避免过度承诺。''',
-            
+注意：要有真人的感觉，基于商品信息回答，避免过度承诺，句意完整。''',
+
             'default': '''你是一位资深电商卖家，提供优质客服。
-语言要求：简短友好，每句≤10字，总字数≤40字。
+语言要求：简短友好，每句≤15字，总字数≤30字。
 回答重点：商品介绍、物流、售后等常见问题。
-注意：结合商品信息，给出实用建议。'''
+注意：要有真人感觉，结合商品信息，给出实用建议，句意完整。'''
         }
     
     def _create_openai_client(self, cookie_id: str) -> Optional[OpenAI]:
@@ -92,6 +92,7 @@ class AIReplyEngine:
 
         return is_custom_model and is_dashscope_url
 
+    # 用不上了
     def _is_gemini_api(self, settings: dict) -> bool:
         """判断是否为Gemini API (通过模型名称)"""
         model_name = settings.get('model_name', '').lower()
@@ -394,11 +395,7 @@ class AIReplyEngine:
 
                 if self._is_dashscope_api(settings):
                     logger.info(f"使用DashScope API生成回复")
-                    reply = self._call_dashscope_api(settings, messages, max_tokens=100, temperature=0.7)
-                
-                elif self._is_gemini_api(settings):
-                    logger.info(f"使用Gemini API生成回复")
-                    reply = self._call_gemini_api(settings, messages, max_tokens=100, temperature=0.7)
+                    reply = self._call_dashscope_api(settings, messages, max_tokens=200, temperature=0.7)
                 
                 else:
                     logger.info(f"使用OpenAI兼容API生成回复")
@@ -407,9 +404,18 @@ class AIReplyEngine:
                     if not client:
                         return None
                     logger.info(f"messages:{messages}")
-                    reply = self._call_openai_api(client, settings, messages, max_tokens=100, temperature=0.7)
+                    reply = self._call_openai_api(client, settings, messages, max_tokens=1000, temperature=0.7)
 
-                # 11. 保存AI回复到对话记录
+                # 11. 清理回复内容（移除所有换行和句号，保持单行）
+                if reply:
+                    reply = reply.replace('\n', ' ').replace('\r', '').strip()
+                    # 将句号替换为空格
+                    reply = reply.replace('。', ' ').replace('.', ' ')
+                    # 移除多余空格（连续多个空格替换为单个）
+                    import re
+                    reply = re.sub(r'\s+', ' ', reply).strip()
+
+                # 12. 保存AI回复到对话记录
                 self.save_conversation(chat_id, cookie_id, user_id, item_id, "assistant", reply, intent)
 
                 # 12. 更新议价次数 (此方法已在 get_bargain_count 中通过 SQL COUNT(*) 隐式实现)
