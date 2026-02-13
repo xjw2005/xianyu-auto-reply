@@ -50,9 +50,9 @@ class DBManager:
         self.conn = None
         self.lock = threading.RLock()  # 使用可重入锁保护数据库操作
 
-        # SQL日志配置 - 默认启用
-        self.sql_log_enabled = True  # 默认启用SQL日志
-        self.sql_log_level = 'INFO'  # 默认使用INFO级别
+        # SQL日志配置 - 默认关闭（可通过环境变量开启）
+        self.sql_log_enabled = False  # 默认关闭SQL逐条日志
+        self.sql_log_level = 'INFO'  # 开启后默认使用INFO级别
 
         # 允许通过环境变量覆盖默认设置
         if os.getenv('SQL_LOG_ENABLED'):
@@ -60,7 +60,7 @@ class DBManager:
         if os.getenv('SQL_LOG_LEVEL'):
             self.sql_log_level = os.getenv('SQL_LOG_LEVEL', 'INFO').upper()
 
-        logger.info(f"SQL日志已启用，日志级别: {self.sql_log_level}")
+        logger.info(f"SQL日志状态: {'启用' if self.sql_log_enabled else '关闭'}，日志级别: {self.sql_log_level}")
 
         self.init_db()
     
@@ -222,6 +222,7 @@ class DBManager:
                 order_id TEXT PRIMARY KEY,
                 item_id TEXT,
                 buyer_id TEXT,
+                chat_id TEXT,
                 spec_name TEXT,
                 spec_value TEXT,
                 quantity TEXT,
@@ -243,6 +244,14 @@ class DBManager:
                 logger.info("正在为 orders 表添加 is_bargain 列...")
                 self._execute_sql(cursor, "ALTER TABLE orders ADD COLUMN is_bargain INTEGER DEFAULT 0")
                 logger.info("orders 表 is_bargain 列添加完成")
+
+            # 检查并添加 chat_id 列（用于轮询自动发货发送消息）
+            try:
+                self._execute_sql(cursor, "SELECT chat_id FROM orders LIMIT 1")
+            except sqlite3.OperationalError:
+                logger.info("正在为 orders 表添加 chat_id 列...")
+                self._execute_sql(cursor, "ALTER TABLE orders ADD COLUMN chat_id TEXT")
+                logger.info("orders 表 chat_id 列添加完成")
 
             # 检查并添加 user_id 列（用于数据库迁移）
             try:
@@ -316,20 +325,17 @@ class DBManager:
             )
             ''')
 
-            # 创建默认回复表（支持账号级别和商品级别）
+            # 创建默认回复表
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS default_replies (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                cookie_id TEXT NOT NULL,
-                item_id TEXT,
+                cookie_id TEXT PRIMARY KEY,
                 enabled BOOLEAN DEFAULT FALSE,
                 reply_content TEXT,
                 reply_image_url TEXT,
                 reply_once BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE,
-                UNIQUE(cookie_id, item_id)
+                FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE
             )
             ''')
 
@@ -351,15 +357,6 @@ class DBManager:
                 if "duplicate column name" not in str(e).lower():
                     logger.warning(f"添加 reply_image_url 字段失败: {e}")
 
-            # 添加 item_id 字段（如果不存在，用于支持商品级别默认回复）
-            try:
-                cursor.execute('ALTER TABLE default_replies ADD COLUMN item_id TEXT')
-                self.conn.commit()
-                logger.info("已添加 item_id 字段到 default_replies 表")
-            except sqlite3.OperationalError as e:
-                if "duplicate column name" not in str(e).lower():
-                    logger.warning(f"添加 item_id 字段失败: {e}")
-
             # 创建指定商品回复表
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS item_replay (
@@ -372,15 +369,14 @@ class DBManager:
                 )
             ''')
 
-            # 创建默认回复记录表（记录已回复的chat_id，支持账号级别和商品级别）
+            # 创建默认回复记录表（记录已回复的chat_id）
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS default_reply_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 cookie_id TEXT NOT NULL,
                 chat_id TEXT NOT NULL,
-                item_id TEXT,
                 replied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(cookie_id, chat_id, item_id),
+                UNIQUE(cookie_id, chat_id),
                 FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE
             )
             ''')
@@ -420,6 +416,18 @@ class DBManager:
                 FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE,
                 FOREIGN KEY (channel_id) REFERENCES notification_channels(id) ON DELETE CASCADE,
                 UNIQUE(cookie_id, channel_id)
+            )
+            ''')
+
+            # 创建通知接收人表
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS notification_recipients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE,
+                user_id TEXT,
+                enabled BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             ''')
 
@@ -1941,125 +1949,49 @@ class DBManager:
                 return {}
 
     # -------------------- 默认回复操作 --------------------
-    def save_default_reply(self, cookie_id: str, enabled: bool, reply_content: str = None, reply_once: bool = False, reply_image_url: str = None, item_id: str = None):
-        """保存默认回复设置（支持账号级别和商品级别）
-        
-        Args:
-            cookie_id: 账号ID
-            enabled: 是否启用
-            reply_content: 回复内容
-            reply_once: 是否只回复一次
-            reply_image_url: 回复图片URL
-            item_id: 商品ID，为None表示账号级别默认回复
-        """
+    def save_default_reply(self, cookie_id: str, enabled: bool, reply_content: str = None, reply_once: bool = False, reply_image_url: str = None):
+        """保存默认回复设置"""
         with self.lock:
             try:
                 cursor = self.conn.cursor()
-                # 先检查是否存在
-                if item_id:
-                    cursor.execute('SELECT id FROM default_replies WHERE cookie_id = ? AND item_id = ?', (cookie_id, item_id))
-                else:
-                    cursor.execute('SELECT id FROM default_replies WHERE cookie_id = ? AND item_id IS NULL', (cookie_id,))
-                
-                existing = cursor.fetchone()
-                
-                if existing:
-                    # 更新
-                    if item_id:
-                        cursor.execute('''
-                        UPDATE default_replies SET enabled = ?, reply_content = ?, reply_image_url = ?, reply_once = ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE cookie_id = ? AND item_id = ?
-                        ''', (enabled, reply_content, reply_image_url, reply_once, cookie_id, item_id))
-                    else:
-                        cursor.execute('''
-                        UPDATE default_replies SET enabled = ?, reply_content = ?, reply_image_url = ?, reply_once = ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE cookie_id = ? AND item_id IS NULL
-                        ''', (enabled, reply_content, reply_image_url, reply_once, cookie_id))
-                else:
-                    # 插入
-                    cursor.execute('''
-                    INSERT INTO default_replies (cookie_id, item_id, enabled, reply_content, reply_image_url, reply_once)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ''', (cookie_id, item_id, enabled, reply_content, reply_image_url, reply_once))
-                
+                cursor.execute('''
+                INSERT OR REPLACE INTO default_replies (cookie_id, enabled, reply_content, reply_image_url, reply_once, updated_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (cookie_id, enabled, reply_content, reply_image_url, reply_once))
                 self.conn.commit()
-                item_desc = f"商品{item_id}" if item_id else "账号级别"
-                logger.debug(f"保存默认回复设置: {cookie_id} ({item_desc}) -> {'启用' if enabled else '禁用'}, 只回复一次: {'是' if reply_once else '否'}")
+                logger.debug(f"保存默认回复设置: {cookie_id} -> {'启用' if enabled else '禁用'}, 只回复一次: {'是' if reply_once else '否'}, 图片: {reply_image_url}")
             except Exception as e:
                 logger.error(f"保存默认回复设置失败: {e}")
                 raise
 
-    def get_default_reply(self, cookie_id: str, item_id: str = None) -> Optional[Dict[str, any]]:
-        """获取指定账号的默认回复设置（支持账号级别和商品级别）
-        
-        Args:
-            cookie_id: 账号ID
-            item_id: 商品ID，为None表示获取账号级别默认回复
-        """
+    def get_default_reply(self, cookie_id: str) -> Optional[Dict[str, any]]:
+        """获取指定账号的默认回复设置"""
         with self.lock:
             try:
                 cursor = self.conn.cursor()
-                if item_id:
-                    cursor.execute('''
-                    SELECT enabled, reply_content, reply_once, reply_image_url, item_id FROM default_replies 
-                    WHERE cookie_id = ? AND item_id = ?
-                    ''', (cookie_id, item_id))
-                else:
-                    cursor.execute('''
-                    SELECT enabled, reply_content, reply_once, reply_image_url, item_id FROM default_replies 
-                    WHERE cookie_id = ? AND item_id IS NULL
-                    ''', (cookie_id,))
+                cursor.execute('''
+                SELECT enabled, reply_content, reply_once, reply_image_url FROM default_replies WHERE cookie_id = ?
+                ''', (cookie_id,))
                 result = cursor.fetchone()
                 if result:
-                    enabled, reply_content, reply_once, reply_image_url, item_id_val = result
+                    enabled, reply_content, reply_once, reply_image_url = result
                     return {
                         'enabled': bool(enabled),
                         'reply_content': reply_content or '',
                         'reply_once': bool(reply_once) if reply_once is not None else False,
-                        'reply_image_url': reply_image_url or '',
-                        'item_id': item_id_val
+                        'reply_image_url': reply_image_url or ''
                     }
                 return None
             except Exception as e:
                 logger.error(f"获取默认回复设置失败: {e}")
                 return None
 
-    def get_item_default_reply(self, cookie_id: str, item_id: str) -> Optional[Dict[str, any]]:
-        """获取商品级别的默认回复设置"""
-        if not item_id:
-            return None
-        return self.get_default_reply(cookie_id, item_id)
-
-    def save_item_default_reply(self, cookie_id: str, item_id: str, reply_content: str, enabled: bool = True, reply_once: bool = False, reply_image_url: str = None) -> bool:
-        """保存商品级别的默认回复设置"""
-        try:
-            logger.info(f"保存商品默认回复: cookie_id={cookie_id}, item_id={item_id}, enabled={enabled}, reply_content={reply_content[:50] if reply_content else ''}")
-            self.save_default_reply(cookie_id, enabled, reply_content, reply_once, reply_image_url, item_id)
-            logger.info(f"商品默认回复保存成功: cookie_id={cookie_id}, item_id={item_id}")
-            return True
-        except Exception as e:
-            logger.error(f"保存商品默认回复失败: {e}")
-            return False
-
-    def delete_item_default_reply(self, cookie_id: str, item_id: str) -> bool:
-        """删除商品级别的默认回复设置"""
-        with self.lock:
-            try:
-                cursor = self.conn.cursor()
-                cursor.execute('DELETE FROM default_replies WHERE cookie_id = ? AND item_id = ?', (cookie_id, item_id))
-                self.conn.commit()
-                logger.debug(f"删除商品默认回复设置: {cookie_id} -> {item_id}")
-                return cursor.rowcount > 0
-            except Exception as e:
-                logger.error(f"删除商品默认回复设置失败: {e}")
-                return False
-
     def get_all_default_replies(self) -> Dict[str, Dict[str, any]]:
-        """获取所有账号的默认回复设置（仅账号级别，item_id为空）"""
+        """获取所有账号的默认回复设置"""
         with self.lock:
             try:
                 cursor = self.conn.cursor()
-                cursor.execute('SELECT cookie_id, enabled, reply_content, reply_once, reply_image_url FROM default_replies WHERE item_id IS NULL')
+                cursor.execute('SELECT cookie_id, enabled, reply_content, reply_once, reply_image_url FROM default_replies')
 
                 result = {}
                 for row in cursor.fetchall():
@@ -2076,52 +2008,42 @@ class DBManager:
                 logger.error(f"获取所有默认回复设置失败: {e}")
                 return {}
 
-    def add_default_reply_record(self, cookie_id: str, chat_id: str, item_id: str = None):
-        """记录已回复的chat_id（支持账号级别和商品级别）"""
+    def add_default_reply_record(self, cookie_id: str, chat_id: str):
+        """记录已回复的chat_id"""
         with self.lock:
             try:
                 cursor = self.conn.cursor()
                 cursor.execute('''
-                INSERT OR IGNORE INTO default_reply_records (cookie_id, chat_id, item_id)
-                VALUES (?, ?, ?)
-                ''', (cookie_id, chat_id, item_id))
+                INSERT OR IGNORE INTO default_reply_records (cookie_id, chat_id)
+                VALUES (?, ?)
+                ''', (cookie_id, chat_id))
                 self.conn.commit()
-                item_desc = f"商品{item_id}" if item_id else "账号级别"
-                logger.debug(f"记录默认回复: {cookie_id} -> {chat_id} ({item_desc})")
+                logger.debug(f"记录默认回复: {cookie_id} -> {chat_id}")
             except Exception as e:
                 logger.error(f"记录默认回复失败: {e}")
 
-    def has_default_reply_record(self, cookie_id: str, chat_id: str, item_id: str = None) -> bool:
-        """检查是否已经回复过该chat_id（支持账号级别和商品级别）"""
+    def has_default_reply_record(self, cookie_id: str, chat_id: str) -> bool:
+        """检查是否已经回复过该chat_id"""
         with self.lock:
             try:
                 cursor = self.conn.cursor()
-                if item_id:
-                    cursor.execute('''
-                    SELECT 1 FROM default_reply_records WHERE cookie_id = ? AND chat_id = ? AND item_id = ?
-                    ''', (cookie_id, chat_id, item_id))
-                else:
-                    cursor.execute('''
-                    SELECT 1 FROM default_reply_records WHERE cookie_id = ? AND chat_id = ? AND item_id IS NULL
-                    ''', (cookie_id, chat_id))
+                cursor.execute('''
+                SELECT 1 FROM default_reply_records WHERE cookie_id = ? AND chat_id = ?
+                ''', (cookie_id, chat_id))
                 result = cursor.fetchone()
                 return result is not None
             except Exception as e:
                 logger.error(f"检查默认回复记录失败: {e}")
                 return False
 
-    def clear_default_reply_records(self, cookie_id: str, item_id: str = None):
-        """清空指定账号的默认回复记录（支持账号级别和商品级别）"""
+    def clear_default_reply_records(self, cookie_id: str):
+        """清空指定账号的默认回复记录"""
         with self.lock:
             try:
                 cursor = self.conn.cursor()
-                if item_id:
-                    cursor.execute('DELETE FROM default_reply_records WHERE cookie_id = ? AND item_id = ?', (cookie_id, item_id))
-                else:
-                    cursor.execute('DELETE FROM default_reply_records WHERE cookie_id = ? AND item_id IS NULL', (cookie_id,))
+                cursor.execute('DELETE FROM default_reply_records WHERE cookie_id = ?', (cookie_id,))
                 self.conn.commit()
-                item_desc = f"商品{item_id}" if item_id else "账号级别"
-                logger.debug(f"清空默认回复记录: {cookie_id} ({item_desc})")
+                logger.debug(f"清空默认回复记录: {cookie_id}")
             except Exception as e:
                 logger.error(f"清空默认回复记录失败: {e}")
 
@@ -2130,7 +2052,7 @@ class DBManager:
         with self.lock:
             try:
                 cursor = self.conn.cursor()
-                self._execute_sql(cursor, "DELETE FROM default_replies WHERE cookie_id = ? AND item_id IS NULL", (cookie_id,))
+                self._execute_sql(cursor, "DELETE FROM default_replies WHERE cookie_id = ?", (cookie_id,))
                 self.conn.commit()
                 logger.debug(f"删除默认回复设置: {cookie_id}")
                 return True
@@ -2139,22 +2061,16 @@ class DBManager:
                 self.conn.rollback()
                 return False
 
-    def update_default_reply_image_url(self, cookie_id: str, new_image_url: str, item_id: str = None) -> bool:
-        """更新默认回复的图片URL（用于将本地图片URL更新为CDN URL，支持账号级别和商品级别）"""
+    def update_default_reply_image_url(self, cookie_id: str, new_image_url: str) -> bool:
+        """更新默认回复的图片URL（用于将本地图片URL更新为CDN URL）"""
         with self.lock:
             try:
                 cursor = self.conn.cursor()
-                if item_id:
-                    cursor.execute('''
-                    UPDATE default_replies SET reply_image_url = ? WHERE cookie_id = ? AND item_id = ?
-                    ''', (new_image_url, cookie_id, item_id))
-                else:
-                    cursor.execute('''
-                    UPDATE default_replies SET reply_image_url = ? WHERE cookie_id = ? AND item_id IS NULL
-                    ''', (new_image_url, cookie_id))
+                cursor.execute('''
+                UPDATE default_replies SET reply_image_url = ? WHERE cookie_id = ?
+                ''', (new_image_url, cookie_id))
                 self.conn.commit()
-                item_desc = f"商品{item_id}" if item_id else "账号级别"
-                logger.debug(f"更新默认回复图片URL: {cookie_id} ({item_desc}) -> {new_image_url}")
+                logger.debug(f"更新默认回复图片URL: {cookie_id} -> {new_image_url}")
                 return True
             except Exception as e:
                 logger.error(f"更新默认回复图片URL失败: {e}")
@@ -2271,6 +2187,132 @@ class DBManager:
                 return cursor.rowcount > 0
             except Exception as e:
                 logger.error(f"删除通知渠道失败: {e}")
+                self.conn.rollback()
+                return False
+
+    # -------------------- 通知接收人操作 --------------------
+    def get_notification_recipients(self, user_id: str = None) -> List[Dict[str, any]]:
+        """获取通知接收人列表
+
+        Args:
+            user_id: 用户ID，如果为None则返回所有接收人
+        """
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                if user_id is not None:
+                    cursor.execute('''
+                    SELECT id, email, user_id, enabled, created_at, updated_at
+                    FROM notification_recipients
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC
+                    ''', (user_id,))
+                else:
+                    cursor.execute('''
+                    SELECT id, email, user_id, enabled, created_at, updated_at
+                    FROM notification_recipients
+                    ORDER BY created_at DESC
+                    ''')
+
+                recipients = []
+                for row in cursor.fetchall():
+                    recipients.append({
+                        'id': row[0],
+                        'email': row[1],
+                        'user_id': row[2],
+                        'enabled': bool(row[3]),
+                        'created_at': row[4],
+                        'updated_at': row[5]
+                    })
+
+                return recipients
+            except Exception as e:
+                logger.error(f"获取通知接收人失败: {e}")
+                return []
+
+    def add_notification_recipient(self, email: str, user_id: str = '') -> int:
+        """添加通知接收人"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute('''
+                INSERT INTO notification_recipients (email, user_id, enabled)
+                VALUES (?, ?, 1)
+                ''', (email, user_id))
+                self.conn.commit()
+                recipient_id = cursor.lastrowid
+                logger.debug(f"添加通知接收人: {email} (ID: {recipient_id})")
+                return recipient_id
+            except Exception as e:
+                logger.error(f"添加通知接收人失败: {e}")
+                self.conn.rollback()
+                raise
+
+    def update_notification_recipient(self, recipient_id: int, user_id: str, email: str = None, enabled: bool = None) -> bool:
+        """更新通知接收人
+
+        Args:
+            recipient_id: 接收人ID
+            user_id: 用户ID，用于验证权限
+            email: 新邮箱地址（可选）
+            enabled: 是否启用（可选）
+        """
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+
+                # 构建更新语句
+                updates = []
+                params = []
+
+                # 检查 email：非空字符串才更新
+                if email is not None and email.strip():
+                    updates.append("email = ?")
+                    params.append(email)
+
+                # 检查 enabled：明确传值才更新
+                if enabled is not None:
+                    updates.append("enabled = ?")
+                    params.append(enabled)
+
+                # 如果没有任何字段需要更新，直接返回
+                if not updates:
+                    return False
+
+                updates.append("updated_at = CURRENT_TIMESTAMP")
+                params.append(recipient_id)
+                params.append(user_id)
+
+                cursor.execute(f'''
+                UPDATE notification_recipients
+                SET {', '.join(updates)}
+                WHERE id = ? AND user_id = ?
+                ''', params)
+
+                self.conn.commit()
+                logger.debug(f"更新通知接收人: {recipient_id}, 用户: {user_id}")
+                return cursor.rowcount > 0
+            except Exception as e:
+                logger.error(f"更新通知接收人失败: {e}")
+                self.conn.rollback()
+                return False
+
+    def delete_notification_recipient(self, recipient_id: int, user_id: str) -> bool:
+        """删除通知接收人
+
+        Args:
+            recipient_id: 接收人ID
+            user_id: 用户ID，用于验证权限
+        """
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute("DELETE FROM notification_recipients WHERE id = ? AND user_id = ?", (recipient_id, user_id))
+                self.conn.commit()
+                logger.debug(f"删除通知接收人: {recipient_id}, 用户: {user_id}")
+                return cursor.rowcount > 0
+            except Exception as e:
+                logger.error(f"删除通知接收人失败: {e}")
                 self.conn.rollback()
                 return False
 
@@ -4578,6 +4620,7 @@ class DBManager:
                 return [], []
 
     def insert_or_update_order(self, order_id: str, item_id: str = None, buyer_id: str = None,
+                              chat_id: str = None,
                               spec_name: str = None, spec_value: str = None, quantity: str = None,
                               amount: str = None, order_status: str = None, cookie_id: str = None,
                               is_bargain: bool = None):
@@ -4609,6 +4652,9 @@ class DBManager:
                     if buyer_id is not None:
                         update_fields.append("buyer_id = ?")
                         update_values.append(buyer_id)
+                    if chat_id is not None:
+                        update_fields.append("chat_id = ?")
+                        update_values.append(chat_id)
                     if spec_name is not None:
                         update_fields.append("spec_name = ?")
                         update_values.append(spec_name)
@@ -4641,10 +4687,10 @@ class DBManager:
                 else:
                     # 插入新订单
                     cursor.execute('''
-                    INSERT INTO orders (order_id, item_id, buyer_id, spec_name, spec_value,
+                    INSERT INTO orders (order_id, item_id, buyer_id, chat_id, spec_name, spec_value,
                                       quantity, amount, order_status, cookie_id, is_bargain)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (order_id, item_id, buyer_id, spec_name, spec_value,
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (order_id, item_id, buyer_id, chat_id, spec_name, spec_value,
                           quantity, amount, order_status or 'unknown', cookie_id,
                           1 if is_bargain else 0))
                     logger.info(f"插入新订单: {order_id}")
@@ -4663,7 +4709,7 @@ class DBManager:
             try:
                 cursor = self.conn.cursor()
                 cursor.execute('''
-                SELECT order_id, item_id, buyer_id, spec_name, spec_value,
+                SELECT order_id, item_id, buyer_id, chat_id, spec_name, spec_value,
                        quantity, amount, order_status, cookie_id, is_bargain, created_at, updated_at
                 FROM orders WHERE order_id = ?
                 ''', (order_id,))
@@ -4675,15 +4721,16 @@ class DBManager:
                         'order_id': row[0],
                         'item_id': row[1],
                         'buyer_id': row[2],
-                        'spec_name': row[3],
-                        'spec_value': row[4],
-                        'quantity': row[5],
-                        'amount': row[6],
-                        'status': row[7],
-                        'cookie_id': row[8],
-                        'is_bargain': bool(row[9]) if row[9] is not None else False,
-                        'created_at': row[10],
-                        'updated_at': row[11]
+                        'chat_id': row[3],
+                        'spec_name': row[4],
+                        'spec_value': row[5],
+                        'quantity': row[6],
+                        'amount': row[7],
+                        'status': row[8],
+                        'cookie_id': row[9],
+                        'is_bargain': bool(row[10]) if row[10] is not None else False,
+                        'created_at': row[11],
+                        'updated_at': row[12]
                     }
                 return None
 
@@ -4713,7 +4760,7 @@ class DBManager:
             try:
                 cursor = self.conn.cursor()
                 cursor.execute('''
-                SELECT order_id, item_id, buyer_id, spec_name, spec_value,
+                SELECT order_id, item_id, buyer_id, chat_id, spec_name, spec_value,
                        quantity, amount, order_status, is_bargain, created_at, updated_at
                 FROM orders WHERE cookie_id = ?
                 ORDER BY created_at DESC LIMIT ?
@@ -4726,14 +4773,15 @@ class DBManager:
                         'order_id': row[0],
                         'item_id': row[1],
                         'buyer_id': row[2],
-                        'spec_name': row[3],
-                        'spec_value': row[4],
-                        'quantity': row[5],
-                        'amount': row[6],
-                        'status': row[7],
-                        'is_bargain': bool(row[8]) if row[8] is not None else False,
-                        'created_at': row[9],
-                        'updated_at': row[10]
+                        'chat_id': row[3],
+                        'spec_name': row[4],
+                        'spec_value': row[5],
+                        'quantity': row[6],
+                        'amount': row[7],
+                        'status': row[8],
+                        'is_bargain': bool(row[9]) if row[9] is not None else False,
+                        'created_at': row[10],
+                        'updated_at': row[11]
                     })
 
                 return orders
@@ -4748,7 +4796,7 @@ class DBManager:
             try:
                 cursor = self.conn.cursor()
                 cursor.execute('''
-                SELECT order_id, item_id, buyer_id, spec_name, spec_value,
+                SELECT order_id, item_id, buyer_id, chat_id, spec_name, spec_value,
                        quantity, amount, order_status, cookie_id, is_bargain, created_at, updated_at
                 FROM orders
                 ORDER BY created_at DESC LIMIT ?
@@ -4761,21 +4809,82 @@ class DBManager:
                         'order_id': row[0],
                         'item_id': row[1],
                         'buyer_id': row[2],
-                        'spec_name': row[3],
-                        'spec_value': row[4],
-                        'quantity': row[5],
-                        'amount': row[6],
-                        'status': row[7],
-                        'cookie_id': row[8],
-                        'is_bargain': bool(row[9]) if row[9] is not None else False,
-                        'created_at': row[10],
-                        'updated_at': row[11]
+                        'chat_id': row[3],
+                        'spec_name': row[4],
+                        'spec_value': row[5],
+                        'quantity': row[6],
+                        'amount': row[7],
+                        'status': row[8],
+                        'cookie_id': row[9],
+                        'is_bargain': bool(row[10]) if row[10] is not None else False,
+                        'created_at': row[11],
+                        'updated_at': row[12]
                     })
 
                 return orders
 
             except Exception as e:
                 logger.error(f"获取所有订单列表失败: {e}")
+                return []
+
+    def get_pending_delivery_orders(self, cookie_id: str = None, limit: int = 100):
+        """
+        获取待发货订单列表（order_status = 'pending_ship'）
+
+        Args:
+            cookie_id: 可选，指定账号ID；为None时查询所有账号
+            limit: 最大返回数量
+
+        Returns:
+            List[Dict]: 待发货订单列表
+        """
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+
+                if cookie_id:
+                    cursor.execute('''
+                    SELECT order_id, item_id, buyer_id, chat_id, spec_name, spec_value,
+                           quantity, amount, order_status, cookie_id, is_bargain, created_at, updated_at
+                    FROM orders
+                    WHERE order_status = 'pending_ship' AND cookie_id = ?
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                    ''', (cookie_id, limit))
+                else:
+                    cursor.execute('''
+                    SELECT order_id, item_id, buyer_id, chat_id, spec_name, spec_value,
+                           quantity, amount, order_status, cookie_id, is_bargain, created_at, updated_at
+                    FROM orders
+                    WHERE order_status = 'pending_ship'
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                    ''', (limit,))
+
+                orders = []
+                for row in cursor.fetchall():
+                    orders.append({
+                        'id': row[0],
+                        'order_id': row[0],
+                        'item_id': row[1],
+                        'buyer_id': row[2],
+                        'chat_id': row[3],
+                        'spec_name': row[4],
+                        'spec_value': row[5],
+                        'quantity': row[6],
+                        'amount': row[7],
+                        'status': row[8],
+                        'cookie_id': row[9],
+                        'is_bargain': bool(row[10]) if row[10] is not None else False,
+                        'created_at': row[11],
+                        'updated_at': row[12]
+                    })
+
+                logger.info(f"查询到 {len(orders)} 个待发货订单" + (f" (账号: {cookie_id})" if cookie_id else ""))
+                return orders
+
+            except Exception as e:
+                logger.error(f"获取待发货订单列表失败: {e}")
                 return []
 
     def delete_table_record(self, table_name: str, record_id: str):
@@ -5185,28 +5294,6 @@ class DBManager:
 
                 for row in cursor.fetchall():
                     log_info = dict(zip(columns, row))
-                    # 将UTC时间转换为本地时间字符串
-                    if log_info.get('created_at'):
-                        try:
-                            from datetime import datetime
-                            # SQLite CURRENT_TIMESTAMP 返回的是UTC时间
-                            utc_time = datetime.strptime(log_info['created_at'], '%Y-%m-%d %H:%M:%S')
-                            # 转换为本地时间
-                            local_time = utc_time.replace(tzinfo=None)
-                            # 加上8小时时差（UTC+8）
-                            from datetime import timedelta
-                            local_time = utc_time + timedelta(hours=8)
-                            log_info['created_at'] = local_time.strftime('%Y-%m-%d %H:%M:%S')
-                        except Exception:
-                            pass  # 保持原值
-                    if log_info.get('updated_at'):
-                        try:
-                            from datetime import datetime, timedelta
-                            utc_time = datetime.strptime(log_info['updated_at'], '%Y-%m-%d %H:%M:%S')
-                            local_time = utc_time + timedelta(hours=8)
-                            log_info['updated_at'] = local_time.strftime('%Y-%m-%d %H:%M:%S')
-                        except Exception:
-                            pass  # 保持原值
                     logs.append(log_info)
 
                 return logs

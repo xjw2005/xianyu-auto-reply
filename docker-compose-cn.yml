@@ -4,12 +4,12 @@ services:
       context: .
       dockerfile: Dockerfile-cn
     image: xianyu-auto-reply:latest
-    container_name: xianyu-auto-reply
+    container_name: xianyu-auto-reply-5.0
     restart: unless-stopped
     # 使用root用户避免权限问题
     user: "0:0"
     ports:
-      - "${WEB_PORT:-8080}:8080"
+      - "${WEB_PORT:-8091}:8080"
     volumes:
       # 数据持久化
       - ./data:/app/data:rw

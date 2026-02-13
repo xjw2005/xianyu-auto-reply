@@ -746,6 +746,15 @@ class XianyuSliderStealth:
     
     def _get_stealth_script(self, browser_features):
         """获取增强反检测脚本"""
+        stable_effective_type = random.choice(['3g', '4g', '5g'])
+        stable_rtt = random.randint(40, 110)
+        stable_downlink = round(random.uniform(2, 12), 2)
+        stable_device_memory = random.choice([4, 8, 16])
+        stable_hardware_concurrency = random.choice([4, 6, 8, 12])
+        stable_max_touch_points = random.choice([0, 0, 1])
+        stable_do_not_track = random.choice(['1', '0', 'unspecified'])
+        stable_notification_permission = random.choice(['default', 'denied'])
+
         return f"""
             // 隐藏webdriver属性
             Object.defineProperty(navigator, 'webdriver', {{
@@ -811,9 +820,9 @@ class XianyuSliderStealth:
             // 模拟真实的连接信息
             Object.defineProperty(navigator, 'connection', {{
                 get: () => ({{
-                    effectiveType: "{random.choice(['3g', '4g', '5g'])}",
-                    rtt: {random.randint(20, 100)},
-                    downlink: {round(random.uniform(1, 10), 2)}
+                    effectiveType: "{stable_effective_type}",
+                    rtt: {stable_rtt},
+                    downlink: {stable_downlink}
                 }})
             }});
             
@@ -1032,7 +1041,7 @@ class XianyuSliderStealth:
             // 伪装 Notification 权限（防止被检测为自动化）
             Object.defineProperty(Notification, 'permission', {{
                 get: function() {{
-                    return ['default', 'granted', 'denied'][Math.floor(Math.random() * 3)];
+                    return '{stable_notification_permission}';
                 }}
             }});
             
@@ -1042,18 +1051,17 @@ class XianyuSliderStealth:
                 const originalEffectiveType = connection.effectiveType;
                 Object.defineProperty(connection, 'effectiveType', {{
                     get: function() {{
-                        const types = ['slow-2g', '2g', '3g', '4g'];
-                        return types[Math.floor(Math.random() * types.length)];
+                        return '{stable_effective_type}';
                     }}
                 }});
                 Object.defineProperty(connection, 'rtt', {{
                     get: function() {{
-                        return Math.floor(Math.random() * 100) + 50; // 50-150ms
+                        return {stable_rtt};
                     }}
                 }});
                 Object.defineProperty(connection, 'downlink', {{
                     get: function() {{
-                        return Math.random() * 10 + 1; // 1-11 Mbps
+                        return {stable_downlink};
                     }}
                 }});
             }}
@@ -1061,30 +1069,28 @@ class XianyuSliderStealth:
             // 伪装 DeviceMemory（设备内存）
             Object.defineProperty(navigator, 'deviceMemory', {{
                 get: function() {{
-                    const memories = [2, 4, 8, 16];
-                    return memories[Math.floor(Math.random() * memories.length)];
+                    return {stable_device_memory};
                 }}
             }});
             
             // 伪装 HardwareConcurrency（CPU核心数）
             Object.defineProperty(navigator, 'hardwareConcurrency', {{
                 get: function() {{
-                    const cores = [2, 4, 6, 8, 12, 16];
-                    return cores[Math.floor(Math.random() * cores.length)];
+                    return {stable_hardware_concurrency};
                 }}
             }});
             
             // 伪装 maxTouchPoints（触摸点数量）
             Object.defineProperty(navigator, 'maxTouchPoints', {{
                 get: function() {{
-                    return Math.floor(Math.random() * 5) + 1; // 1-5个触摸点
+                    return {stable_max_touch_points};
                 }}
             }});
             
             // 伪装 DoNotTrack
             Object.defineProperty(navigator, 'doNotTrack', {{
                 get: function() {{
-                    return ['1', '0', 'unspecified', null][Math.floor(Math.random() * 4)];
+                    return '{stable_do_not_track}';
                 }}
             }});
             
@@ -1179,65 +1185,72 @@ class XianyuSliderStealth:
         else:
             return t
     
-    def _generate_physics_trajectory(self, distance: float):
-        """基于物理加速度模型生成轨迹 - 极速模式
-        
-        优化策略：
-        1. 极少轨迹点（5-8步）：快速完成
-        2. 持续加速：一气呵成，不减速
-        3. 确保超调50%以上：保证滑动到位
-        4. 无回退：单向滑动
-        """
+    def _generate_physics_trajectory(self, distance: float, attempt: int = 1):
+        """基于物理模型生成更稳健的滑动轨迹。"""
         trajectory = []
-        # 确保超调100%
-        target_distance = distance * random.uniform(2.0, 2.1)  # 超调100-110%
-        
-        # 极少步数（5-8步）
-        steps = random.randint(5, 8)
-        
-        # 极快时间间隔
-        base_delay = random.uniform(0.0002, 0.0005)
-        
-        # 生成轨迹点 - 直线加速
+
+        if attempt == 1:
+            overshoot_min, overshoot_max = 0.995, 1.015
+            strategy_name = "标准轨迹"
+        elif attempt == 2:
+            overshoot_min, overshoot_max = 1.005, 1.03
+            strategy_name = "轻微超调"
+        else:
+            overshoot_min, overshoot_max = 0.985, 1.01
+            strategy_name = "轻微欠调"
+
+        target_distance = distance * random.uniform(overshoot_min, overshoot_max)
+        logger.info(f"【{self.pure_user_id}】🎯 第{attempt}次：{strategy_name}")
+
+        if attempt == 1:
+            steps = random.randint(28, 42)
+            base_delay = random.uniform(0.008, 0.016)
+        elif attempt == 2:
+            steps = random.randint(24, 36)
+            base_delay = random.uniform(0.007, 0.014)
+        else:
+            steps = random.randint(26, 38)
+            base_delay = random.uniform(0.008, 0.015)
+
+        last_x = 0.0
         for i in range(steps):
             progress = (i + 1) / steps
-            
-            # 计算当前位置（使用平方加速曲线，越来越快）
-            x = target_distance * (progress ** 1.5)  # 加速曲线
-            
-            # 极小Y轴抖动
-            y = random.uniform(0, 2)
-            
-            # 极短延迟
-            delay = base_delay * random.uniform(0.9, 1.1)
-            
+            eased = self._easing_function(progress, mode='easeInOutCubic')
+            x = target_distance * eased + random.uniform(-0.6, 0.6)
+            if x < last_x + 0.2:
+                x = last_x + 0.2
+            y = random.uniform(-1.2, 1.2)
+            delay = base_delay * random.uniform(0.85, 1.25)
             trajectory.append((x, y, delay))
-        
-        logger.info(f"【{self.pure_user_id}】极速模式：{len(trajectory)}步，超调100%+")
+            last_x = x
+
+        logger.info(f"【{self.pure_user_id}】稳健模式：{len(trajectory)}步，策略={strategy_name}")
         return trajectory
     
-    def generate_human_trajectory(self, distance: float):
-        """生成人类化滑动轨迹 - 只使用极速物理模型"""
+    def generate_human_trajectory(self, distance: float, attempt: int = 1):
+        """生成人类化滑动轨迹。"""
         try:
-            # 只使用物理加速度模型（移除贝塞尔模型以提高速度和稳定性）
-            logger.info(f"【{self.pure_user_id}】📐 使用极速物理模型生成轨迹")
-            trajectory = self._generate_physics_trajectory(distance)
-            
-            logger.debug(f"【{self.pure_user_id}】极速模式：一次拖到位，无回退")
-            
-            # 保存轨迹数据
+            logger.info(f"【{self.pure_user_id}】📐 使用稳健物理模型生成轨迹 (第{attempt}次)")
+
+            # 传递尝试次数以支持自适应超调
+            trajectory = self._generate_physics_trajectory(distance, attempt)
+
+            logger.debug(f"【{self.pure_user_id}】稳健模式：连续拖动，无回退")
+
+            # 保存轨迹数据（记录尝试次数）
             self.current_trajectory_data = {
                 "distance": distance,
-                "model": "physics_fast",
+                "model": "physics_stable",
                 "total_steps": len(trajectory),
                 "trajectory_points": trajectory.copy(),
                 "final_left_px": 0,
                 "completion_used": False,
-                "completion_steps": 0
+                "completion_steps": 0,
+                "attempt": attempt  # 记录尝试次数
             }
-            
+
             return trajectory
-            
+
         except Exception as e:
             logger.error(f"【{self.pure_user_id}】生成轨迹时出错: {str(e)}")
             return []
@@ -1912,14 +1925,53 @@ class XianyuSliderStealth:
     def calculate_slide_distance(self, slider_button: ElementHandle, slider_track: ElementHandle):
         """计算滑动距离 - 增强精度，支持刮刮乐"""
         try:
-            # 获取滑块按钮位置和大小
-            button_box = slider_button.bounding_box()
+            # 确保元素可见并重试获取位置
+            button_box = None
+            track_box = None
+            
+            for _ in range(3):
+                try:
+                    if slider_button.is_visible():
+                        button_box = slider_button.bounding_box()
+                    if slider_track.is_visible():
+                        track_box = slider_track.bounding_box()
+                    
+                    if button_box and track_box:
+                        break
+                    time.sleep(0.2)
+                except Exception:
+                    pass
+
+            # 如果常规方法失败，尝试强制JS获取
+            if not button_box or not track_box:
+                logger.warning(f"【{self.pure_user_id}】常规方法获取位置失败，尝试JS强制获取")
+                try:
+                    # 获取元素所在的frame或page上下文
+                    context = slider_button.owner_frame if hasattr(slider_button, 'owner_frame') else self.page
+                    if not context: # 如果是ElementHandle但没有owner_frame属性(新版playwright可能不同)，尝试使用page
+                         context = self.page
+
+                    js_rect = context.evaluate("""(elements) => {
+                        const [btn, track] = elements;
+                        const btnRect = btn.getBoundingClientRect();
+                        const trackRect = track.getBoundingClientRect();
+                        return {
+                            btn: {x: btnRect.x, y: btnRect.y, width: btnRect.width, height: btnRect.height},
+                            track: {x: trackRect.x, y: trackRect.y, width: trackRect.width, height: trackRect.height}
+                        };
+                    }""", [slider_button, slider_track])
+                    
+                    if js_rect:
+                        button_box = js_rect['btn']
+                        track_box = js_rect['track']
+                        logger.info(f"【{self.pure_user_id}】JS强制获取位置成功")
+                except Exception as e:
+                    logger.error(f"【{self.pure_user_id}】JS强制获取位置也失败: {e}")
+
             if not button_box:
                 logger.error(f"【{self.pure_user_id}】无法获取滑块按钮位置")
                 return 0
             
-            # 获取滑块轨道位置和大小
-            track_box = slider_track.bounding_box()
             if not track_box:
                 logger.error(f"【{self.pure_user_id}】无法获取滑块轨道位置")
                 return 0
@@ -1929,10 +1981,14 @@ class XianyuSliderStealth:
             
             # 🔑 关键优化1：使用JavaScript获取更精确的尺寸（避免DPI缩放影响）
             try:
-                precise_distance = self.page.evaluate("""
+                # 确定执行上下文
+                context = slider_button.owner_frame if hasattr(slider_button, 'owner_frame') else self.page
+                if not context: context = self.page
+
+                precise_distance = context.evaluate("""
                     () => {
-                        const button = document.querySelector('#nc_1_n1z') || document.querySelector('.nc_iconfont');
-                        const track = document.querySelector('#nc_1_n1t') || document.querySelector('.nc_scale');
+                        const button = document.querySelector('#nc_1_n1z') || document.querySelector('.nc_iconfont') || document.querySelector('[id*="nc_1_n1z"]');
+                        const track = document.querySelector('#nc_1_n1t') || document.querySelector('.nc_scale') || document.querySelector('[id*="nc_1_n1t"]');
                         if (button && track) {
                             const buttonRect = button.getBoundingClientRect();
                             const trackRect = track.getBoundingClientRect();
@@ -2062,36 +2118,21 @@ class XianyuSliderStealth:
                 logger.info(f"【{self.pure_user_id}】✓ 滑块容器已消失（不存在或不可见），验证成功")
                 return True
             
-            # 容器还在，需要等待更长时间并检查失败提示
-            logger.info(f"【{self.pure_user_id}】滑块容器仍存在且可见，等待验证结果...")
-            time.sleep(1.2)  # 等待验证结果
-            
-            # 再次检查容器状态
-            container_exists, container_visible = check_container_status()
-            
-            # 如果容器消失了，返回成功
-            if not container_exists or not container_visible:
-                logger.info(f"【{self.pure_user_id}】✓ 滑块容器已消失，验证成功")
-                return True
-            
-            # 容器还在，检查是否有验证失败提示
-            logger.info(f"【{self.pure_user_id}】滑块容器仍存在，检查验证失败提示...")
-            if self.check_verification_failure():
-                logger.warning(f"【{self.pure_user_id}】检测到验证失败提示，验证失败")
-                return False
-            
-            # 容器还在，但没有失败提示，可能还在验证中或验证失败
-            # 再等待一小段时间后再次检查
-            time.sleep(0.5)
-            container_exists, container_visible = check_container_status()
-            
-            if not container_exists or not container_visible:
-                logger.info(f"【{self.pure_user_id}】✓ 滑块容器已消失，验证成功")
-                return True
-            
-            # 容器仍然存在，且没有失败提示，可能是验证失败但没有显示失败提示
-            # 或者验证还在进行中，但为了不无限等待，返回失败
-            logger.warning(f"【{self.pure_user_id}】滑块容器仍存在且可见，且未检测到失败提示，但验证可能失败")
+            # 容器还在，分阶段轮询几次再判定，减少误判
+            logger.info(f"【{self.pure_user_id}】滑块容器仍存在且可见，进入轮询检查...")
+            for i in range(6):
+                time.sleep(0.4)
+                container_exists, container_visible = check_container_status()
+                if not container_exists or not container_visible:
+                    logger.info(f"【{self.pure_user_id}】✓ 轮询第{i + 1}次：滑块容器已消失，验证成功")
+                    return True
+
+                # 仅在中后期检查失败提示，避免过早误判
+                if i in (2, 5) and self.check_verification_failure():
+                    logger.warning(f"【{self.pure_user_id}】检测到验证失败提示，验证失败")
+                    return False
+
+            logger.warning(f"【{self.pure_user_id}】轮询结束后容器仍存在，判定为验证失败")
             return False
             
         except Exception as e:
@@ -2131,15 +2172,13 @@ class XianyuSliderStealth:
             logger.info(f"【{self.pure_user_id}】检查验证失败提示...")
             
             # 等待一下让失败提示出现（由于调用前已经等待了，这里等待时间缩短）
-            time.sleep(1.5)
+            time.sleep(0.35)
             
             # 检查页面内容中是否包含验证失败相关文字
             page_content = self.page.content()
             failure_keywords = [
                 "验证失败",
                 "点击框体重试", 
-                "重试",
-                "失败",
                 "请重试",
                 "验证码错误",
                 "滑动验证失败"
@@ -2161,16 +2200,13 @@ class XianyuSliderStealth:
                 "text=验证失败，点击框体重试",
                 "text=验证失败",
                 "text=点击框体重试", 
-                "text=重试",
                 ".nc-lang-cnt",
                 "[class*='retry']",
                 "[class*='fail']",
                 "[class*='error']",
                 ".captcha-tips",
                 "#captcha-loading",
-                ".nc_1_nocaptcha",
-                ".nc_wrapper",
-                ".nc-container"
+                ".nc_1_nocaptcha"
             ]
             
             retry_button = None
@@ -2185,6 +2221,13 @@ class XianyuSliderStealth:
                         except:
                             pass
                         
+                        # 对通用class选择器要求文本中包含明确失败词，避免误判
+                        strict_text_required = selector in [
+                            ".nc-lang-cnt", "[class*='retry']", "[class*='fail']", "[class*='error']", ".captcha-tips", "#captcha-loading"
+                        ]
+                        if strict_text_required and not any(k in (element_text or "") for k in failure_keywords):
+                            continue
+
                         logger.info(f"【{self.pure_user_id}】找到验证失败提示: {selector}, 文本: {element_text}")
                         retry_button = element
                         break
@@ -2201,6 +2244,37 @@ class XianyuSliderStealth:
         except Exception as e:
             logger.error(f"【{self.pure_user_id}】检查验证失败时出错: {e}")
             return False
+
+    def _prepare_next_attempt(self):
+        """准备下一次尝试：优先点击重试，其次刷新验证码页。"""
+        try:
+            target = self._detected_slider_frame if hasattr(self, '_detected_slider_frame') and self._detected_slider_frame else self.page
+            retry_selectors = [
+                "text=点击框体重试",
+                "text=请重试",
+                "text=重试",
+                "[class*='retry']",
+                "[class*='refresh']"
+            ]
+
+            for selector in retry_selectors:
+                try:
+                    el = target.query_selector(selector)
+                    if el and el.is_visible():
+                        el.click(timeout=1200)
+                        logger.info(f"【{self.pure_user_id}】已点击重试控件: {selector}")
+                        time.sleep(random.uniform(0.25, 0.6))
+                        return
+                except Exception:
+                    continue
+
+            current_url = self.page.url if self.page else ""
+            if current_url and any(k in current_url.lower() for k in ["captcha", "punish", "validate"]):
+                logger.info(f"【{self.pure_user_id}】未找到重试控件，刷新验证码页面")
+                self.page.reload(wait_until="domcontentloaded", timeout=15000)
+                time.sleep(random.uniform(0.4, 0.9))
+        except Exception as e:
+            logger.debug(f"【{self.pure_user_id}】准备下一次尝试时出错: {e}")
     
     def _analyze_failure(self, attempt: int, slide_distance: float, trajectory_data: dict):
         """分析失败原因并记录"""
@@ -2244,6 +2318,7 @@ class XianyuSliderStealth:
                     retry_delay = random.uniform(0.5, 1.0)  # 减少等待时间
                     logger.info(f"【{self.pure_user_id}】等待{retry_delay:.2f}秒后重试...")
                     time.sleep(retry_delay)
+                    self._prepare_next_attempt()
                     
                     # 不刷新页面，直接在原来的frame中重试
                     # 保留frame引用，让重试时可以直接使用原来的frame查找滑块
@@ -2264,9 +2339,9 @@ class XianyuSliderStealth:
                 if slide_distance <= 0:
                     logger.error(f"【{self.pure_user_id}】滑动距离计算失败")
                     continue
-                
-                # 3. 生成人类化轨迹
-                trajectory = self.generate_human_trajectory(slide_distance)
+
+                # 3. 生成人类化轨迹（传递尝试次数以支持自适应超调）
+                trajectory = self.generate_human_trajectory(slide_distance, attempt)
                 if not trajectory:
                     logger.error(f"【{self.pure_user_id}】轨迹生成失败")
                     continue
@@ -2760,7 +2835,74 @@ class XianyuSliderStealth:
                                 if not has_slider_in_frame:
                                     logger.info(f"【{self.pure_user_id}】✅ 在Frame {idx} 检测到二维码验证: {selector}")
                                     logger.info(f"【{self.pure_user_id}】二维码Frame URL: {frame_url}")
-                                    return True, frame
+
+                                    # ✅ 添加：二维码截图逻辑
+                                    screenshot_path = None
+                                    try:
+                                        # 删除该账号的旧二维码截图
+                                        import glob
+                                        screenshots_dir = "static/uploads/images"
+                                        os.makedirs(screenshots_dir, exist_ok=True)
+                                        old_screenshots = glob.glob(os.path.join(screenshots_dir, f"qr_verify_{self.pure_user_id}_*.jpg"))
+                                        for old_file in old_screenshots:
+                                            try:
+                                                os.remove(old_file)
+                                                logger.info(f"【{self.pure_user_id}】删除旧的二维码截图: {old_file}")
+                                            except Exception as e:
+                                                logger.warning(f"【{self.pure_user_id}】删除旧截图失败: {e}")
+
+                                        # 尝试截取二维码frame的截图
+                                        screenshot_bytes = None
+                                        try:
+                                            # 先尝试截图frame
+                                            screenshot_bytes = frame.screenshot()
+                                            logger.info(f"【{self.pure_user_id}】已截取二维码frame")
+                                        except Exception as e:
+                                            logger.warning(f"【{self.pure_user_id}】截取frame失败，尝试截取frame元素: {e}")
+                                            try:
+                                                # 如果frame截图失败，尝试获取frame元素并截图
+                                                frame_element = frame.frame_element()
+                                                if frame_element:
+                                                    screenshot_bytes = frame_element.screenshot()
+                                                    logger.info(f"【{self.pure_user_id}】已截取二维码frame元素")
+                                            except Exception as e2:
+                                                logger.warning(f"【{self.pure_user_id}】截取frame元素也失败: {e2}")
+
+                                        if screenshot_bytes:
+                                            # 生成带时间戳的文件名并保存
+                                            from datetime import datetime
+                                            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                            filename = f"qr_verify_{self.pure_user_id}_{timestamp}.jpg"
+                                            file_path = os.path.join(screenshots_dir, filename)
+
+                                            try:
+                                                with open(file_path, 'wb') as f:
+                                                    f.write(screenshot_bytes)
+                                                # 返回相对路径
+                                                screenshot_path = file_path.replace('\\', '/')
+                                                logger.info(f"【{self.pure_user_id}】✅ 二维码截图已保存: {screenshot_path}")
+                                            except Exception as e:
+                                                logger.error(f"【{self.pure_user_id}】保存截图失败: {e}")
+                                                screenshot_path = None
+                                        else:
+                                            logger.warning(f"【{self.pure_user_id}】⚠️ 二维码截图失败，无法获取截图数据")
+                                    except Exception as e:
+                                        logger.error(f"【{self.pure_user_id}】二维码截图时出错: {e}")
+                                        import traceback
+                                        logger.debug(traceback.format_exc())
+
+                                    # 创建包含截图路径的frame对象
+                                    class QrVerificationFrame:
+                                        """二维码验证frame对象，包含截图路径"""
+                                        def __init__(self, original_frame, screenshot_path=None):
+                                            self._original_frame = original_frame
+                                            self.screenshot_path = screenshot_path
+                                            self.verify_url = None
+
+                                        def __getattr__(self, name):
+                                            return getattr(self._original_frame, name)
+
+                                    return True, QrVerificationFrame(frame, screenshot_path)
                         except:
                             continue
                     

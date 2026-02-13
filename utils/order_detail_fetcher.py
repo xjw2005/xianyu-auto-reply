@@ -41,7 +41,6 @@ class OrderDetailFetcher:
     _order_locks = defaultdict(lambda: asyncio.Lock())
 
     def __init__(self, cookie_string: str = None, headless: bool = True):
-        self.playwright = None  # 保存playwright实例，确保能正确关闭
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
@@ -76,7 +75,7 @@ class OrderDetailFetcher:
 
             logger.info(f"开始初始化浏览器，headless模式: {headless}")
 
-            self.playwright = await async_playwright().start()
+            playwright = await async_playwright().start()
 
             # 启动浏览器（Docker环境优化）
             browser_args = [
@@ -138,7 +137,7 @@ class OrderDetailFetcher:
                 ])
 
             logger.info(f"启动浏览器，参数: {browser_args}")
-            self.browser = await self.playwright.chromium.launch(
+            self.browser = await playwright.chromium.launch(
                 headless=headless,
                 args=browser_args
             )
@@ -354,7 +353,7 @@ class OrderDetailFetcher:
             except Exception as e:
                 logger.error(f"获取订单详情失败: {e}")
                 return None
-
+            
     def _parse_sku_content(self, sku_content: str) -> Dict[str, str]:
         """
         解析SKU内容，根据冒号分割规格名称和规格值
@@ -626,14 +625,6 @@ class OrderDetailFetcher:
                     pass
                 self.browser = None
 
-            # 强制关闭playwright实例
-            if self.playwright:
-                try:
-                    await self.playwright.stop()
-                except:
-                    pass
-                self.playwright = None
-
         except Exception as e:
             logger.debug(f"强制关闭浏览器过程中的异常（可忽略）: {e}")
 
@@ -642,17 +633,10 @@ class OrderDetailFetcher:
         try:
             if self.page:
                 await self.page.close()
-                self.page = None
             if self.context:
                 await self.context.close()
-                self.context = None
             if self.browser:
                 await self.browser.close()
-                self.browser = None
-            # 关闭playwright实例，释放所有资源
-            if self.playwright:
-                await self.playwright.stop()
-                self.playwright = None
             logger.info("浏览器已关闭")
         except Exception as e:
             logger.error(f"关闭浏览器失败: {e}")
@@ -751,29 +735,3 @@ async def fetch_order_detail_simple(order_id: str, cookie_string: str = None, he
     finally:
         await fetcher.close()
     return None
-
-
-# 测试代码
-if __name__ == "__main__":
-    async def test():
-        # 测试订单ID
-        test_order_id = "2856024697612814489"
-        
-        print(f"🔍 开始获取订单详情: {test_order_id}")
-        
-        result = await fetch_order_detail_simple(test_order_id, headless=False)
-        
-        if result:
-            print("✅ 订单详情获取成功:")
-            print(f"📋 订单ID: {result['order_id']}")
-            print(f"🌐 URL: {result['url']}")
-            print(f"📄 页面标题: {result['title']}")
-            print(f"🛍️ 规格名称: {result.get('spec_name', '未获取到')}")
-            print(f"📝 规格值: {result.get('spec_value', '未获取到')}")
-            print(f"🔢 数量: {result.get('quantity', '未获取到')}")
-            print(f"💰 金额: {result.get('amount', '未获取到')}")
-        else:
-            print("❌ 订单详情获取失败")
-    
-    # 运行测试
-    asyncio.run(test())

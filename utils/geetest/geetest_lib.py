@@ -133,7 +133,11 @@ class GeetestLib:
                 logger.debug(f"极验register响应: {data}")
                 return data.get("challenge", "")
         except Exception as e:
-            logger.error(f"极验register请求失败: {e}")
+            import traceback
+            logger.error(f"极验register请求失败: {type(e).__name__}: {e}")
+            logger.error(f"请求URL: {url}")
+            logger.error(f"请求参数: {params}")
+            logger.debug(f"详细堆栈:\n{traceback.format_exc()}")
             return ""
     
     def _build_register_result(

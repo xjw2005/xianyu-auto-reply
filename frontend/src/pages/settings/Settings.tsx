@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Settings as SettingsIcon, Save, Bot, Mail, RefreshCw, Key, Download, Upload, Archive, Eye, EyeOff, Copy } from 'lucide-react'
-import { getSystemSettings, updateSystemSettings, testAIConnection, testEmailSend, changePassword, downloadDatabaseBackup, uploadDatabaseBackup, reloadSystemCache, exportUserBackup, importUserBackup } from '@/api/settings'
+import { getSystemSettings, updateSystemSettings, testAIConnection, testEmailSend, changePassword, downloadDatabaseBackup, uploadDatabaseBackup, reloadSystemCache, exportUserBackup, importUserBackup, getNotificationRecipients, addNotificationRecipient, updateNotificationRecipient } from '@/api/settings'
+import type { NotificationRecipient } from '@/api/settings'
 import { getAccounts } from '@/api/accounts'
 import { useUIStore } from '@/store/uiStore'
 import { useAuthStore } from '@/store/authStore'
@@ -40,6 +41,9 @@ export function Settings() {
   const [showCurrentPassword, setShowCurrentPassword] = useState(false)
   const [showNewPassword, setShowNewPassword] = useState(false)
   const [showConfirmPassword, setShowConfirmPassword] = useState(false)
+
+  // 通知接收人邮箱
+  const [recipientEmail, setRecipientEmail] = useState('')
 
   const loadSettings = async () => {
     if (!_hasHydrated || !isAuthenticated || !token) return
@@ -176,13 +180,7 @@ export function Settings() {
   // 下载数据库备份（管理员）
   const handleDownloadBackup = () => {
     const url = downloadDatabaseBackup()
-    // 使用 a 标签下载，避免被弹窗拦截器阻止
-    const link = document.createElement('a')
-    link.href = url
-    link.download = ''
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
+    window.open(url, '_blank')
   }
 
   // 上传数据库备份（管理员）
@@ -233,13 +231,7 @@ export function Settings() {
   // 导出用户备份
   const handleExportUserBackup = () => {
     const url = exportUserBackup()
-    // 使用 a 标签下载，避免被弹窗拦截器阻止
-    const link = document.createElement('a')
-    link.href = url
-    link.download = ''
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
+    window.open(url, '_blank')
   }
 
   // 导入用户备份
@@ -261,6 +253,70 @@ export function Settings() {
       addToast({ type: 'error', message: '备份导入失败' })
     } finally {
       e.target.value = ''
+    }
+  }
+
+  // 通知接收人管理
+  const loadRecipientEmail = async () => {
+    const result = await getNotificationRecipients()
+    if (result.success && result.data && result.data.length > 0) {
+      // 获取第一个启用的接收人邮箱
+      const enabled = result.data.find(r => r.enabled)
+      if (enabled) {
+        setRecipientEmail(enabled.email)
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (_hasHydrated && isAuthenticated && token) {
+      loadRecipientEmail()
+    }
+  }, [_hasHydrated, isAuthenticated, token])
+
+  const handleSaveRecipientEmail = async () => {
+    if (!recipientEmail.trim()) {
+      addToast({ type: 'error', message: '请输入邮箱地址' })
+      return
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+    if (!emailRegex.test(recipientEmail)) {
+      addToast({ type: 'error', message: '请输入有效的邮箱地址' })
+      return
+    }
+    try {
+      setSaving(true)
+      // 获取现有的接收人
+      const result = await getNotificationRecipients()
+      let existingRecipient: NotificationRecipient | undefined
+
+      if (result.success && Array.isArray(result.data) && result.data.length > 0) {
+        existingRecipient = result.data.find(r => r.enabled)
+      }
+
+      if (existingRecipient) {
+        // 更新现有的接收人
+        const updateResult = await updateNotificationRecipient(String(existingRecipient.id), {
+          email: recipientEmail
+        })
+        if (updateResult.success) {
+          addToast({ type: 'success', message: '更新成功' })
+        } else {
+          addToast({ type: 'error', message: updateResult.message || '更新失败' })
+        }
+      } else {
+        // 添加新的接收人
+        const addResult = await addNotificationRecipient(recipientEmail)
+        if (addResult.success) {
+          addToast({ type: 'success', message: '保存成功' })
+        } else {
+          addToast({ type: 'error', message: addResult.message || '保存失败' })
+        }
+      }
+    } catch {
+      addToast({ type: 'error', message: '保存失败' })
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -429,8 +485,8 @@ export function Settings() {
                     placeholder="选择账号"
                   />
                 </div>
-                <button 
-                  onClick={handleTestAI} 
+                <button
+                  onClick={handleTestAI}
                   className="btn-ios-secondary"
                   disabled={testingAI || !testAccountId}
                 >
@@ -553,6 +609,34 @@ export function Settings() {
             </div>
           </div>
           )}
+
+          {/* 通知设置 - 所有用户可见 */}
+          <div className="vben-card">
+            <div className="vben-card-header">
+              <h2 className="vben-card-title">
+                <Mail className="w-4 h-4" />
+                通知设置
+              </h2>
+            </div>
+            <div className="vben-card-body space-y-4">
+              <p className="text-sm text-slate-500 dark:text-slate-400">配置接收登录验证二维码等通知的邮箱地址</p>
+              <div className="input-group">
+                <label className="input-label font-medium text-slate-700 dark:text-slate-300">通知收件邮箱</label>
+                <input
+                  type="email"
+                  value={recipientEmail}
+                  onChange={(e) => setRecipientEmail(e.target.value)}
+                  placeholder="your-email@example.com"
+                  className="input-ios"
+                />
+                <p className="text-xs text-slate-400 mt-1">用于接收登录验证二维码等通知的邮箱地址</p>
+              </div>
+              <button onClick={handleSaveRecipientEmail} disabled={saving} className="btn-ios-primary">
+                {saving ? <ButtonLoading /> : <Save className="w-4 h-4" />}
+                保存邮箱设置
+              </button>
+            </div>
+          </div>
 
           {/* 密码修改 */}
           <div className="vben-card">

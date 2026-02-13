@@ -625,8 +625,22 @@ class OrderStatusHandler:
             for cookie_id in expired_cookies_red:
                 del self._pending_red_reminder_messages[cookie_id]
                 logger.info(f"清理过期的待处理红色提醒消息: 账号 {cookie_id}")
+
+            # 清理过期的订单状态历史（按最后一条记录时间判断）
+            expired_history_orders = []
+            for order_id, history in self._order_status_history.items():
+                if not history:
+                    expired_history_orders.append(order_id)
+                    continue
+                last_ts = history[-1].get('timestamp', 0)
+                if current_time - last_ts >= max_age_seconds:
+                    expired_history_orders.append(order_id)
+
+            for order_id in expired_history_orders:
+                del self._order_status_history[order_id]
+                logger.info(f"清理过期的订单状态历史: 订单 {order_id}")
             
-            total_cleared = len(expired_orders) + len(expired_cookies_system) + len(expired_cookies_red)
+            total_cleared = len(expired_orders) + len(expired_cookies_system) + len(expired_cookies_red) + len(expired_history_orders)
             if total_cleared > 0:
                 logger.info(f"内存清理完成，共清理了 {total_cleared} 个过期项目")
     

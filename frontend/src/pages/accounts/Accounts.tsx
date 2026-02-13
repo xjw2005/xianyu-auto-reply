@@ -31,7 +31,6 @@ export function Accounts() {
   const [defaultReplyAccount, setDefaultReplyAccount] = useState<AccountWithKeywordCount | null>(null)
   const [defaultReplyContent, setDefaultReplyContent] = useState('')
   const [defaultReplyImageUrl, setDefaultReplyImageUrl] = useState('')
-  const [defaultReplyOnce, setDefaultReplyOnce] = useState(false)
   const [defaultReplySaving, setDefaultReplySaving] = useState(false)
   const [uploadingDefaultReplyImage, setUploadingDefaultReplyImage] = useState(false)
 
@@ -424,7 +423,6 @@ export function Accounts() {
     setDefaultReplyAccount(account)
     setDefaultReplyContent('')
     setDefaultReplyImageUrl('')
-    setDefaultReplyOnce(false)
     setActiveModal('default-reply')
     
     // 加载当前默认回复
@@ -432,7 +430,6 @@ export function Accounts() {
       const result = await getDefaultReply(account.id)
       setDefaultReplyContent(result.reply_content || '')
       setDefaultReplyImageUrl(result.reply_image_url || '')
-      setDefaultReplyOnce(result.reply_once || false)
     } catch {
       // ignore
     }
@@ -443,7 +440,7 @@ export function Accounts() {
     
     try {
       setDefaultReplySaving(true)
-      await updateDefaultReply(defaultReplyAccount.id, defaultReplyContent, true, defaultReplyOnce, defaultReplyImageUrl)
+      await updateDefaultReply(defaultReplyAccount.id, defaultReplyContent, true, false, defaultReplyImageUrl)
       addToast({ type: 'success', message: '默认回复已保存' })
       closeModal()
     } catch {
@@ -490,9 +487,11 @@ export function Accounts() {
   const handleToggleAI = async (account: AccountWithKeywordCount) => {
     const newEnabled = !account.aiEnabled
     try {
-      // 只更新 ai_enabled 字段
+      // 先获取当前设置，避免覆盖其他字段（如custom_prompts）
+      const currentSettings = await getAIReplySettings(account.id)
       await updateAIReplySettings(account.id, {
-        ai_enabled: newEnabled,
+        ...currentSettings,
+        ai_enabled: newEnabled,  // 直接使用 ai_enabled 字段
       })
       setAccounts(prev => prev.map(a =>
         a.id === account.id ? { ...a, aiEnabled: newEnabled } : a,
@@ -1182,20 +1181,6 @@ export function Accounts() {
                     </button>
                   </div>
                 )}
-              </div>
-              <div className="input-group">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={defaultReplyOnce}
-                    onChange={(e) => setDefaultReplyOnce(e.target.checked)}
-                    className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-slate-700 dark:text-slate-300">只能回复一次</span>
-                </label>
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                  开启后，每个对话只会使用默认回复一次，避免重复回复同一用户
-                </p>
               </div>
               <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
                 <p className="text-xs text-blue-600 dark:text-blue-400">
