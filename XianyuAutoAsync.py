@@ -8055,6 +8055,24 @@ class XianyuLive:
             elif send_message == '已发货':
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】发货确认消息不处理')
                 return
+            elif "订单即将自动确认收货" in send_message:
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】自动确认收获消息不处理')
+                return
+            elif "我完成了评价" in send_message:
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】评价完成消息不处理')
+                return
+            elif "创建合约" in send_message:
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】创建合约消息不处理')
+                return
+            elif "蚂蚁森林" in send_message:
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】蚂蚁森林消息不处理')
+                return
+            elif "恭喜你拿到曝光卡" in send_message:
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】曝光卡消息不处理')
+                return
+            elif "退款成功，钱款已原路退返" in send_message:
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】退款成功消息不处理')
+                return
             # 【重要】检查是否为自动发货触发消息 - 即使在人工接入暂停期间也要处理
             elif self._is_auto_delivery_trigger(send_message):
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】检测到自动发货触发消息，即使在暂停期间也继续处理: {send_message}')
