@@ -8073,6 +8073,9 @@ class XianyuLive:
             elif "退款成功，钱款已原路退返" in send_message:
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】退款成功消息不处理')
                 return
+            elif "宝贝性价比如何，去表个态吧" in send_message:
+                logger.info(f'[{msg_time}] 【{self.cookie_id}】系统评价消息不处理')
+                return
             # 【重要】检查是否为自动发货触发消息 - 即使在人工接入暂停期间也要处理
             elif self._is_auto_delivery_trigger(send_message):
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】检测到自动发货触发消息，即使在暂停期间也继续处理: {send_message}')
